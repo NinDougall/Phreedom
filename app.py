@@ -88,6 +88,9 @@ def init_state() -> None:
     st.session_state.timesheet = bridge.fetch_timesheet()
     st.session_state.messages = chat if chat else [_DEFAULT_ASSISTANT_MSG]
     st.session_state.active_page = "Dashboard"
+    # File staging for explicit Submit flow
+    st.session_state.ts_uploader_rev = 0
+    st.session_state.ts_staged_file = None
 
     # Profile settings — loaded from manifest, used as widget defaults
     st.session_state.profile_business_type = profile.get("business_type", "")
@@ -1285,6 +1288,8 @@ def render_timesheet(tax_rate: float) -> None:
     upload_col, pad_col = st.columns([0.55, 0.45], gap="large")
     with upload_col:
         st.markdown("##### Upload timesheet file")
+
+        # File uploader — key increments after submit/cancel to reset the widget
         ts_upload = st.file_uploader(
             "Drop a timesheet CSV here",
             type=["csv"],
@@ -1293,19 +1298,101 @@ def render_timesheet(tax_rate: float) -> None:
                 "Supported columns: date, project/client, hours, rate, total_pay. "
                 "Column names are detected automatically."
             ),
-            key="ts_page_uploader",
+            key=f"ts_page_uploader_{st.session_state.ts_uploader_rev}",
         )
+
+        # Stage bytes + preview when a new file is attached
         if ts_upload is not None:
-            if f"_ts_ingested_{ts_upload.name}_{ts_upload.size}" not in st.session_state:
-                with st.spinner(f"Vaulting {ts_upload.name}..."):
-                    was_new, msg = ingest_to_vault(ts_upload)
-                st.session_state[f"_ts_ingested_{ts_upload.name}_{ts_upload.size}"] = True
-                if was_new:
-                    st.success(msg)
-                    _status(f"Timesheet file ingested: {msg}")
+            file_key = f"{ts_upload.name}:{ts_upload.size}"
+            staged = st.session_state.ts_staged_file
+            if staged is None or staged.get("key") != file_key:
+                content = ts_upload.getvalue()
+                preview_df, preview_summary = parse_timesheet_csv(ts_upload.name, content)
+                st.session_state.ts_staged_file = {
+                    "key": file_key,
+                    "name": ts_upload.name,
+                    "content": content,
+                    "preview_df": preview_df,
+                    "preview_summary": preview_summary,
+                }
+
+        # Staged file UI: preview table + Submit / Cancel
+        staged = st.session_state.ts_staged_file
+        if staged is not None:
+            preview_df = staged["preview_df"]
+            if not preview_df.empty:
+                total_h = float(preview_df["hours"].sum())
+                total_p = float(preview_df["total_pay"].sum())
+                st.markdown(
+                    f'<p class="nd-note"><strong>{staged["name"]}</strong> — '
+                    f'{len(preview_df)} rows, {total_h:,.2f} h, {format_usd(total_p)}. '
+                    f'Review below then click <strong>Submit to timesheet</strong>.</p>',
+                    unsafe_allow_html=True,
+                )
+                # Compact preview (max 8 rows)
+                disp = preview_df.head(8).copy()
+                disp["date"] = pd.to_datetime(disp["date"]).dt.strftime("%Y-%m-%d")
+                disp = disp.rename(columns={
+                    "date": "Date", "project": "Project",
+                    "hours": "Hours", "rate": "Rate", "total_pay": "Total Pay",
+                })
+                st.dataframe(
+                    disp.style.format({"Hours": "{:.2f}", "Rate": "${:,.2f}", "Total Pay": "${:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if len(preview_df) > 8:
+                    st.caption(f"Showing 8 of {len(preview_df)} rows.")
+
+                _divider_space(0.35)
+                submit_c, cancel_c, _ = st.columns([0.32, 0.22, 0.46])
+                with submit_c:
+                    if st.button(
+                        "Submit to timesheet",
+                        key="ts_submit_btn",
+                        use_container_width=True,
+                        help="Save these entries to the permanent vault and timesheet.",
+                    ):
+                        class _StagedUpload:
+                            def __init__(self, n, c):
+                                self.name = n
+                                self._c = c
+                            def getvalue(self):
+                                return self._c
+
+                        with st.spinner("Saving to vault…"):
+                            was_new, msg = ingest_to_vault(
+                                _StagedUpload(staged["name"], staged["content"])
+                            )
+                        st.session_state.ts_staged_file = None
+                        st.session_state.ts_uploader_rev += 1
+                        if was_new:
+                            st.success(msg)
+                            _status(f"Timesheet submitted: {msg}")
+                        else:
+                            st.info(msg)
+                        st.rerun()
+
+                with cancel_c:
+                    if st.button(
+                        "Cancel",
+                        key="ts_cancel_btn",
+                        use_container_width=True,
+                        help="Discard this file without saving.",
+                    ):
+                        st.session_state.ts_staged_file = None
+                        st.session_state.ts_uploader_rev += 1
+                        st.rerun()
+
+            else:
+                st.warning(
+                    f"**{staged['name']}** — no timesheet columns detected. "
+                    "Check that the file has date and hours columns."
+                )
+                if st.button("Clear", key="ts_clear_bad_btn"):
+                    st.session_state.ts_staged_file = None
+                    st.session_state.ts_uploader_rev += 1
                     st.rerun()
-                else:
-                    st.info(msg)
 
         with st.expander("Expected CSV format", expanded=False):
             st.markdown(
