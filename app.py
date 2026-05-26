@@ -9,6 +9,7 @@ and falls back to deterministic local analysis otherwise.
 from __future__ import annotations
 
 import calendar
+import html
 import io
 import os
 import re
@@ -19,6 +20,7 @@ from typing import Any
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from pypdf import PdfReader
 
 
@@ -346,17 +348,18 @@ def financial_summary(ledger: pd.DataFrame, tax_rate: float) -> dict[str, Any]:
 
 
 def section_heading(title: str, eyebrow: str | None = None, body: str | None = None) -> None:
-    """Render a minimalist section heading."""
+    """Render a minimalist section heading with semantic grouping."""
 
+    heading_id = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "section"
     eyebrow_html = f'<div class="section-eyebrow">{eyebrow}</div>' if eyebrow else ""
     body_html = f'<p class="section-body">{body}</p>' if body else ""
     st.markdown(
         f"""
-        <div class="section-heading">
+        <section class="section-heading" aria-labelledby="{heading_id}">
             {eyebrow_html}
-            <h2>{title}</h2>
+            <h2 id="{heading_id}">{title}</h2>
             {body_html}
-        </div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
@@ -949,6 +952,66 @@ def render_global_styles() -> None:
                 border-color: var(--brand-pale);
                 color: #170431;
             }
+            a.skip-link {
+                background: var(--brand-pale);
+                border-radius: 0.75rem;
+                color: #170431;
+                font-weight: 850;
+                left: 1rem;
+                padding: 0.75rem 1rem;
+                position: absolute;
+                top: -4rem;
+                z-index: 10000;
+            }
+            a.skip-link:focus {
+                top: 1rem;
+            }
+            button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible,
+            [tabindex]:focus-visible, div[data-baseweb="select"]:focus-within, div[data-testid="stFileUploader"]:focus-within {
+                outline: 3px solid var(--brand-pale) !important;
+                outline-offset: 3px !important;
+                box-shadow: 0 0 0 5px rgba(224, 214, 248, 0.18) !important;
+            }
+            .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button,
+            .stTabs [data-baseweb="tab"] {
+                min-height: 2.75rem;
+                min-width: 2.75rem;
+            }
+            input, textarea, div[data-baseweb="select"] {
+                min-height: 2.75rem;
+            }
+            .sr-only {
+                border: 0;
+                clip: rect(0 0 0 0);
+                height: 1px;
+                margin: -1px;
+                overflow: hidden;
+                padding: 0;
+                position: absolute;
+                white-space: nowrap;
+                width: 1px;
+            }
+            @media (max-width: 640px) {
+                .block-container {
+                    padding: 1.25rem 1rem 3rem;
+                }
+                .hero {
+                    padding: 1.4rem;
+                }
+                .brand-lockup {
+                    align-items: flex-start;
+                    flex-direction: column;
+                    gap: 0.8rem;
+                }
+                .brand-wordmark {
+                    font-size: 2rem;
+                    line-height: 1.05;
+                    overflow-wrap: anywhere;
+                }
+                .hero-palette span {
+                    width: 2.6rem;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1000,10 +1063,12 @@ def render_timesheet_dashboard() -> None:
 
         if submitted:
             if hours <= 0 or rate <= 0:
-                st.warning("Enter positive hours and rate before adding a timesheet entry.")
+                st.warning("Timesheet entry error: enter hours greater than 0 and a rate greater than 0 before adding the entry.")
+                render_accessible_status("Timesheet entry error. Enter positive hours and rate.")
             else:
                 add_timesheet_entry(work_date, project, hours, rate)
                 st.success(f"Added {hours:.2f} hours at ${rate:,.2f}/hr for ${hours * rate:,.2f}.")
+                render_accessible_status("Timesheet entry added successfully.")
 
     dashboard = earnings_dashboard_summary(st.session_state.timesheet, monthly_target, base_rate, as_of)
 
@@ -1121,10 +1186,45 @@ def render_timesheet_dashboard() -> None:
             mime="text/csv",
         )
 
-    if st.button("Clear timesheet entries"):
+    if st.button("Clear timesheet entries", help="Removes only timesheet entries and the matching timesheet income rows from the ledger."):
+        render_accessible_status("Timesheet entries cleared.")
         st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
         st.session_state.ledger = st.session_state.ledger[st.session_state.ledger["source"] != "Timesheet"]
         st.rerun()
+
+
+def render_accessibility_landmarks() -> None:
+    """Add skip link, main landmark target, page language, and polite status region."""
+
+    components.html(
+        "<script>window.parent.document.documentElement.setAttribute('lang', 'en');</script>",
+        height=0,
+        width=0,
+    )
+    st.markdown(
+        """
+        <a class="skip-link" href="#main-content">Skip to main content</a>
+        <div id="app-status" class="sr-only" role="status" aria-live="polite">Application ready.</div>
+        <main id="main-content" tabindex="-1" aria-label="N-Deavourservices financial agent workspace">
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def close_accessibility_landmarks() -> None:
+    """Close the semantic main landmark opened after page setup."""
+
+    st.markdown("</main>", unsafe_allow_html=True)
+
+
+def render_accessible_status(message: str) -> None:
+    """Expose dynamic updates to assistive technologies without moving focus."""
+
+    safe_message = html.escape(message)
+    st.markdown(
+        f'<div class="sr-only" role="status" aria-live="polite">{safe_message}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_hero() -> None:
@@ -1132,7 +1232,7 @@ def render_hero() -> None:
 
     st.markdown(
         """
-        <div class="hero">
+        <section class="hero" aria-labelledby="brand-hero-title">
             <div class="brand-lockup" aria-label="N-Deavourservices logo">
                 <svg class="brand-mark" viewBox="0 0 120 120" role="img" aria-hidden="true">
                     <path d="M60 6 L106 33 L106 87 L60 114 L14 87 L14 33 Z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
@@ -1146,15 +1246,15 @@ def render_hero() -> None:
                 </div>
             </div>
             <div class="hero-kicker">Private financial agent</div>
-            <h1>Automated finance alignment for expenses, income, and tax readiness.</h1>
+            <h1 id="brand-hero-title">Automated finance alignment for expenses, income, and tax readiness.</h1>
             <p>Upload documents, track billable work, audit ledger categories, and ask focused questions from one branded workspace built around clarity and efficiency.</p>
-            <div class="hero-palette">
+            <div class="hero-palette" aria-hidden="true">
                 <span class="swatch-mist"></span>
                 <span class="swatch-lavender"></span>
                 <span class="swatch-blue"></span>
                 <span class="swatch-green"></span>
             </div>
-        </div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
@@ -1169,16 +1269,26 @@ def render_profile_controls() -> tuple[str, float, str]:
             business_type = st.text_input(
                 "Business or income type",
                 placeholder="Freelancer, LLC, sole proprietor...",
+                help="Optional context used by the chat agent when answering financial questions.",
             )
         with tax_col:
-            tax_rate = st.slider("Tax savings reserve rate", 0, 50, 30, format="%d%%") / 100
+            tax_rate = st.slider(
+                "Tax savings reserve rate",
+                0,
+                50,
+                30,
+                format="%d%%",
+                help="Choose the percentage of positive net profit to reserve for taxes.",
+            ) / 100
         with notes_col:
             tax_notes = st.text_area(
                 "Tax notes",
                 placeholder="State, filing status, estimated payments, payroll, deductions...",
+                help="Optional notes that help the agent personalize tax guidance.",
             )
 
-        if st.button("Clear all remembered financial data"):
+        if st.button("Clear all remembered financial data", help="Removes uploaded documents, ledger memory, chat history, and timesheet entries from this session."):
+            render_accessible_status("All remembered financial data cleared from this session.")
             st.session_state.ledger = pd.DataFrame(columns=LEDGER_COLUMNS)
             st.session_state.document_summaries = []
             st.session_state.processed_files = set()
@@ -1273,6 +1383,7 @@ def main() -> None:
     st.set_page_config(page_title="N-Deavourservices Financial Agent", page_icon=":moneybag:", layout="wide")
     init_state()
     render_global_styles()
+    render_accessibility_landmarks()
     render_hero()
 
     business_type, tax_rate, tax_notes = render_profile_controls()
@@ -1301,6 +1412,8 @@ def main() -> None:
             "Use the remembered ledger, documents, and timesheet to ask direct financial questions.",
         )
         render_chat(tax_rate, business_type, tax_notes)
+
+    close_accessibility_landmarks()
 
 
 if __name__ == "__main__":
