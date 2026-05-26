@@ -77,6 +77,10 @@ def init_state() -> None:
     st.session_state.messages = chat if chat else [_DEFAULT_ASSISTANT_MSG]
     st.session_state.active_page = "Dashboard"
 
+    # File staging for explicit Submit flow on the Timesheet page
+    st.session_state.ts_uploader_rev = 0
+    st.session_state.ts_staged_file = None
+
     st.session_state.profile_business_type = profile.get("business_type", "")
     st.session_state.profile_tax_rate = float(profile.get("tax_reserve_rate", 0.30))
     st.session_state.profile_tax_notes = profile.get("tax_notes", "")
@@ -776,49 +780,120 @@ def render_timesheet(tax_rate: float) -> None:
                 "Supported columns: date, project/client, hours, rate, total_pay. "
                 "Column names are detected automatically."
             ),
-            key="ts_page_uploader",
+            key=f"ts_page_uploader_{st.session_state.ts_uploader_rev}",
         )
+
+        # Stage bytes + preview when a new file is attached
         if ts_upload is not None:
-            cache_key = f"_ts_ingested_{ts_upload.name}_{ts_upload.size}"
-            if cache_key not in st.session_state:
-                orchestrator = _get_orchestrator()
-                with st.spinner(f"Vaulting {ts_upload.name}..."):
-                    result = orchestrator.handle_upload(
-                        ts_upload.name, ts_upload.getvalue(), st.session_state.ledger
-                    )
-                st.session_state[cache_key] = True
-                if result["was_new"]:
-                    st.session_state.ledger = result["ledger"]
-                    if result.get("is_timesheet") and result.get("timesheet") is not None:
-                        new_ts = result["timesheet"]
-                        # Deduplicate against existing timesheet rows by (date, project, hours)
-                        existing_ts = st.session_state.timesheet
-                        if not existing_ts.empty:
-                            existing_keys = set(
-                                zip(
-                                    existing_ts["date"].astype(str),
-                                    existing_ts["project"].astype(str),
-                                    existing_ts["hours"].astype(str),
-                                )
+            from agents.ingestion_worker import parse_timesheet_csv as _parse_ts_csv
+            file_key = f"{ts_upload.name}:{ts_upload.size}"
+            staged = st.session_state.ts_staged_file
+            if staged is None or staged.get("key") != file_key:
+                content = ts_upload.getvalue()
+                preview_df, preview_summary = _parse_ts_csv(ts_upload.name, content)
+                st.session_state.ts_staged_file = {
+                    "key": file_key,
+                    "name": ts_upload.name,
+                    "content": content,
+                    "preview_df": preview_df,
+                    "preview_summary": preview_summary,
+                }
+
+        # Staged file UI: preview table + Submit / Cancel
+        staged = st.session_state.ts_staged_file
+        if staged is not None:
+            preview_df = staged["preview_df"]
+            if not preview_df.empty:
+                total_h = float(preview_df["hours"].sum())
+                total_p = float(preview_df["total_pay"].sum())
+                st.markdown(
+                    f'<p class="nd-note"><strong>{staged["name"]}</strong> — '
+                    f'{len(preview_df)} rows, {total_h:,.2f} h, {format_usd(total_p)}. '
+                    f'Review below then click <strong>Submit to timesheet</strong>.</p>',
+                    unsafe_allow_html=True,
+                )
+                disp = preview_df.head(8).copy()
+                disp["date"] = pd.to_datetime(disp["date"]).dt.strftime("%Y-%m-%d")
+                disp = disp.rename(columns={
+                    "date": "Date", "project": "Project",
+                    "hours": "Hours", "rate": "Rate", "total_pay": "Total Pay",
+                })
+                st.dataframe(
+                    disp.style.format({"Hours": "{:.2f}", "Rate": "${:,.2f}", "Total Pay": "${:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if len(preview_df) > 8:
+                    st.caption(f"Showing 8 of {len(preview_df)} rows.")
+
+                _divider_space(0.35)
+                submit_c, cancel_c, _ = st.columns([0.32, 0.22, 0.46])
+                with submit_c:
+                    if st.button(
+                        "Submit to timesheet",
+                        key="ts_submit_btn",
+                        use_container_width=True,
+                        help="Save these entries to the permanent vault and timesheet.",
+                    ):
+                        orchestrator = _get_orchestrator()
+                        with st.spinner("Saving to vault…"):
+                            result = orchestrator.handle_upload(
+                                staged["name"], staged["content"], st.session_state.ledger
                             )
-                            new_ts = new_ts[
-                                ~new_ts.apply(
-                                    lambda r: (
-                                        str(r["date"]), str(r["project"]), str(r["hours"])
-                                    ) in existing_keys,
-                                    axis=1,
-                                )
-                            ]
-                        if not new_ts.empty:
-                            st.session_state.timesheet = pd.concat(
-                                [st.session_state.timesheet, new_ts], ignore_index=True
-                            )
-                            _flush_timesheet()
-                    st.success(result["message"])
-                    _status(f"Timesheet file ingested: {result['message']}")
+                        st.session_state.ts_staged_file = None
+                        st.session_state.ts_uploader_rev += 1
+                        if result["was_new"]:
+                            st.session_state.ledger = result["ledger"]
+                            if result.get("is_timesheet") and result.get("timesheet") is not None:
+                                new_ts = result["timesheet"]
+                                existing_ts = st.session_state.timesheet
+                                if not existing_ts.empty:
+                                    existing_keys = set(
+                                        zip(
+                                            existing_ts["date"].astype(str),
+                                            existing_ts["project"].astype(str),
+                                            existing_ts["hours"].astype(str),
+                                        )
+                                    )
+                                    new_ts = new_ts[
+                                        ~new_ts.apply(
+                                            lambda r: (
+                                                str(r["date"]), str(r["project"]), str(r["hours"])
+                                            ) in existing_keys,
+                                            axis=1,
+                                        )
+                                    ]
+                                if not new_ts.empty:
+                                    st.session_state.timesheet = pd.concat(
+                                        [st.session_state.timesheet, new_ts], ignore_index=True
+                                    )
+                                    _flush_timesheet()
+                            st.success(result["message"])
+                            _status(f"Timesheet submitted: {result['message']}")
+                        else:
+                            st.info(result["message"])
+                        st.rerun()
+
+                with cancel_c:
+                    if st.button(
+                        "Cancel",
+                        key="ts_cancel_btn",
+                        use_container_width=True,
+                        help="Discard this file without saving.",
+                    ):
+                        st.session_state.ts_staged_file = None
+                        st.session_state.ts_uploader_rev += 1
+                        st.rerun()
+
+            else:
+                st.warning(
+                    f"**{staged['name']}** — no timesheet columns detected. "
+                    "Check that the file has date and hours columns."
+                )
+                if st.button("Clear", key="ts_clear_bad_btn"):
+                    st.session_state.ts_staged_file = None
+                    st.session_state.ts_uploader_rev += 1
                     st.rerun()
-                else:
-                    st.info(result["message"])
 
         with st.expander("Expected CSV format", expanded=False):
             st.markdown(
