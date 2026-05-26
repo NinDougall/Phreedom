@@ -724,125 +724,168 @@ def metric_card(label: str, value: str, status_value: float | None = None) -> No
 
 
 def render_global_styles() -> None:
-    """Apply a dark, high-contrast visual system without hiding functionality."""
+    """Apply the N-Deavourservices brand system from the brand guide."""
 
     st.markdown(
         """
         <style>
             :root {
-                --ph-bg: #020617;
-                --ph-surface: #0B1220;
-                --ph-card: #0F172A;
-                --ph-card-strong: #111827;
-                --ph-ink: #F8FAFC;
-                --ph-muted: #CBD5E1;
-                --ph-subtle: #94A3B8;
-                --ph-line: #334155;
-                --ph-line-soft: #1E293B;
-                --ph-accent: #5EEAD4;
-                --ph-accent-strong: #22D3EE;
-                --ph-positive: #86EFAC;
-                --ph-negative: #FCA5A5;
+                --brand-bg: #09041A;
+                --brand-surface: #10081F;
+                --brand-card: #150D27;
+                --brand-card-strong: #1C1233;
+                --brand-primary: #372757;
+                --brand-secondary: #8679A4;
+                --brand-soft: #E0D6F8;
+                --brand-pale: #F6ECFF;
+                --brand-ink: #F6ECFF;
+                --brand-muted: #D7CCEA;
+                --brand-subtle: #B7A7D0;
+                --brand-line: #463368;
+                --brand-line-soft: #2E2148;
+                --brand-positive: #A7F3D0;
+                --brand-negative: #FCA5A5;
             }
             .stApp {
                 background:
-                    radial-gradient(circle at 20% 0%, rgba(34, 211, 238, 0.10), transparent 28rem),
-                    radial-gradient(circle at 85% 12%, rgba(94, 234, 212, 0.08), transparent 30rem),
-                    var(--ph-bg);
-                color: var(--ph-ink);
+                    radial-gradient(circle at 18% -8%, rgba(134, 121, 164, 0.28), transparent 30rem),
+                    radial-gradient(circle at 92% 4%, rgba(224, 214, 248, 0.11), transparent 28rem),
+                    linear-gradient(180deg, #0D061D 0%, var(--brand-bg) 42%, #05020E 100%);
+                color: var(--brand-ink);
             }
             .block-container {
                 max-width: 1180px;
                 padding: 3rem 3rem 4rem;
             }
             h1, h2, h3, h4, h5, h6, p, label, span {
-                color: var(--ph-ink);
+                color: var(--brand-ink);
             }
             h1, h2, h3 {
                 letter-spacing: -0.035em;
             }
             .hero {
-                background: linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(11, 18, 32, 0.98));
-                border: 1px solid var(--ph-line);
-                border-radius: 1.25rem;
+                background:
+                    linear-gradient(135deg, rgba(28, 18, 51, 0.98), rgba(15, 8, 31, 0.98)),
+                    var(--brand-card);
+                border: 1px solid var(--brand-line);
+                border-radius: 1.35rem;
                 margin: 0 0 2.5rem;
-                padding: clamp(2rem, 5vw, 4rem);
+                padding: clamp(2rem, 5vw, 4.25rem);
                 text-align: left;
             }
-            .hero-kicker {
-                color: var(--ph-accent);
-                font-size: 0.82rem;
+            .brand-lockup {
+                align-items: center;
+                color: var(--brand-soft);
+                display: flex;
+                gap: 1.1rem;
+                margin-bottom: 2rem;
+            }
+            .brand-mark {
+                color: var(--brand-soft);
+                flex: 0 0 auto;
+                height: 4.2rem;
+                width: 4.2rem;
+            }
+            .brand-wordmark {
+                color: var(--brand-soft);
+                font-size: clamp(1.8rem, 4vw, 3.4rem);
+                font-weight: 850;
+                letter-spacing: -0.075em;
+                line-height: 0.95;
+            }
+            .brand-tagline {
+                color: var(--brand-secondary);
+                font-size: clamp(1rem, 2vw, 1.5rem);
                 font-weight: 800;
+                letter-spacing: -0.025em;
+                margin-top: 0.55rem;
+            }
+            .hero-kicker {
+                color: var(--brand-soft);
+                font-size: 0.82rem;
+                font-weight: 850;
                 letter-spacing: 0.16em;
                 margin-bottom: 1rem;
                 text-transform: uppercase;
             }
             .hero h1 {
-                color: var(--ph-ink);
-                font-size: clamp(2.35rem, 5vw, 4.2rem);
-                font-weight: 650;
+                color: var(--brand-ink);
+                font-size: clamp(2.15rem, 4.7vw, 3.85rem);
+                font-weight: 680;
                 line-height: 1.04;
                 margin-bottom: 1rem;
-                max-width: 820px;
+                max-width: 840px;
             }
             .hero p {
-                color: var(--ph-muted);
+                color: var(--brand-muted);
                 font-size: 1.08rem;
-                line-height: 1.7;
+                line-height: 1.75;
                 margin: 0;
-                max-width: 680px;
+                max-width: 700px;
             }
             .hero-palette {
-                display: none;
+                display: flex;
+                gap: 0.45rem;
+                margin-top: 1.75rem;
             }
+            .hero-palette span {
+                border: 1px solid rgba(246, 236, 255, 0.18);
+                border-radius: 999px;
+                height: 0.5rem;
+                width: 4.8rem;
+            }
+            .swatch-mist { background: var(--brand-primary); }
+            .swatch-lavender { background: var(--brand-secondary); }
+            .swatch-blue { background: var(--brand-soft); }
+            .swatch-green { background: var(--brand-pale); }
             .section-heading { margin: 2.75rem 0 1.15rem; }
             .section-heading h2 {
-                color: var(--ph-ink);
+                color: var(--brand-ink);
                 font-size: 1.6rem;
-                font-weight: 700;
+                font-weight: 760;
                 margin: 0.2rem 0 0;
             }
             .section-eyebrow {
-                color: var(--ph-accent);
+                color: var(--brand-soft);
                 font-size: 0.78rem;
-                font-weight: 800;
+                font-weight: 850;
                 letter-spacing: 0.14em;
                 text-transform: uppercase;
             }
             .section-body {
-                color: var(--ph-muted);
+                color: var(--brand-muted);
                 font-size: 1rem;
-                line-height: 1.65;
+                line-height: 1.7;
                 margin: 0.5rem 0 0;
                 max-width: 760px;
             }
             .metric-card {
-                background: var(--ph-card);
-                border: 1px solid var(--ph-line);
-                border-radius: 1rem;
+                background: var(--brand-card);
+                border: 1px solid var(--brand-line);
+                border-radius: 1.05rem;
                 box-shadow: none;
                 min-height: 7rem;
                 padding: 1.2rem 1.15rem;
                 text-align: left;
             }
             .metric-card-label {
-                color: var(--ph-subtle);
+                color: var(--brand-subtle);
                 font-size: 0.78rem;
-                font-weight: 800;
+                font-weight: 850;
                 letter-spacing: 0.09em;
                 margin-bottom: 0.7rem;
                 text-transform: uppercase;
             }
             .metric-card-value {
-                color: var(--ph-accent);
+                color: var(--brand-soft);
                 font-size: clamp(1.45rem, 2.4vw, 2rem);
-                font-weight: 720;
+                font-weight: 780;
                 letter-spacing: -0.035em;
             }
-            .metric-card.positive .metric-card-value { color: var(--ph-positive); }
-            .metric-card.negative .metric-card-value { color: var(--ph-negative); }
+            .metric-card.positive .metric-card-value { color: var(--brand-positive); }
+            .metric-card.negative .metric-card-value { color: var(--brand-negative); }
             .tracking-note {
-                color: var(--ph-muted);
+                color: var(--brand-muted);
                 font-size: 1rem;
                 line-height: 1.65;
                 margin: 0.35rem 0 1.3rem;
@@ -850,65 +893,61 @@ def render_global_styles() -> None:
             .stTabs [data-baseweb="tab-list"] {
                 gap: 0.35rem;
                 padding: 0.25rem;
-                background: var(--ph-surface);
-                border: 1px solid var(--ph-line);
+                background: var(--brand-surface);
+                border: 1px solid var(--brand-line);
                 border-radius: 0.95rem;
             }
             .stTabs [data-baseweb="tab"] {
                 border-radius: 0.75rem;
-                color: var(--ph-muted);
-                font-weight: 700;
+                color: var(--brand-muted);
+                font-weight: 760;
                 padding: 0.65rem 1.05rem;
             }
-            .stTabs [data-baseweb="tab"] * {
-                color: inherit;
-            }
+            .stTabs [data-baseweb="tab"] * { color: inherit; }
             .stTabs [aria-selected="true"] {
-                background: var(--ph-accent);
-                color: #001C1F;
+                background: var(--brand-soft);
+                color: #170431;
             }
-            .stTabs [aria-selected="true"] * {
-                color: #001C1F;
-            }
+            .stTabs [aria-selected="true"] * { color: #170431; }
             div[data-testid="stExpander"] {
-                background: var(--ph-card);
-                border: 1px solid var(--ph-line);
+                background: var(--brand-card);
+                border: 1px solid var(--brand-line);
                 border-radius: 1rem;
                 box-shadow: none;
                 margin-bottom: 0.85rem;
             }
             div[data-testid="stExpander"] details summary p {
-                color: var(--ph-ink);
-                font-weight: 700;
+                color: var(--brand-ink);
+                font-weight: 750;
             }
             div[data-testid="stFileUploader"],
             div[data-testid="stDataFrame"],
             div[data-testid="stDataEditor"] {
-                background: var(--ph-card);
-                border: 1px solid var(--ph-line-soft);
+                background: var(--brand-card);
+                border: 1px solid var(--brand-line-soft);
                 border-radius: 1rem;
             }
             .stChatMessage {
-                background: var(--ph-card);
-                border: 1px solid var(--ph-line);
+                background: var(--brand-card);
+                border: 1px solid var(--brand-line);
                 border-radius: 1rem;
                 padding: 0.75rem;
             }
             div[data-testid="stAlert"] {
-                background: var(--ph-card-strong);
-                color: var(--ph-ink);
-                border: 1px solid var(--ph-line);
+                background: var(--brand-card-strong);
+                border: 1px solid var(--brand-line);
+                color: var(--brand-ink);
             }
             .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
-                background: var(--ph-accent);
-                border: 1px solid var(--ph-accent);
-                color: #001C1F;
-                font-weight: 800;
+                background: var(--brand-soft);
+                border: 1px solid var(--brand-soft);
+                color: #170431;
+                font-weight: 850;
             }
             .stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {
-                background: var(--ph-accent-strong);
-                border-color: var(--ph-accent-strong);
-                color: #001C1F;
+                background: var(--brand-pale);
+                border-color: var(--brand-pale);
+                color: #170431;
             }
         </style>
         """,
@@ -1009,7 +1048,7 @@ def render_timesheet_dashboard() -> None:
         month_sort = chart_data["month"].tolist()
         bars = (
             alt.Chart(chart_data)
-            .mark_bar(color="#22D3EE")
+            .mark_bar(color="#8679A4")
             .encode(
                 x=alt.X("month:N", sort=month_sort, title="Month"),
                 y=alt.Y("actual:Q", title="Earnings (USD)"),
@@ -1018,7 +1057,7 @@ def render_timesheet_dashboard() -> None:
         )
         target_line = (
             alt.Chart(chart_data)
-            .mark_line(color="#5EEAD4", strokeWidth=3)
+            .mark_line(color="#E0D6F8", strokeWidth=3)
             .encode(
                 x=alt.X("month:N", sort=month_sort),
                 y="target:Q",
@@ -1089,14 +1128,26 @@ def render_timesheet_dashboard() -> None:
 
 
 def render_hero() -> None:
-    """Render a quiet Gemini-inspired app introduction."""
+    """Render the N-Deavourservices branded app introduction."""
 
     st.markdown(
         """
         <div class="hero">
-            <div class="hero-kicker">Phreedom financial agent</div>
-            <h1>Your money, clearly organized.</h1>
-            <p>Ask questions, upload documents, track billable work, and see whether your month is on pace without visual clutter.</p>
+            <div class="brand-lockup" aria-label="N-Deavourservices logo">
+                <svg class="brand-mark" viewBox="0 0 120 120" role="img" aria-hidden="true">
+                    <path d="M60 6 L106 33 L106 87 L60 114 L14 87 L14 33 Z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+                    <path d="M37 44 C38 30 56 28 62 40 C70 28 91 34 88 52 C99 60 94 82 77 82 C71 94 50 94 44 82 C28 84 21 63 34 54 C29 48 31 41 37 44 Z" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M42 49 C52 54 59 61 62 73 M79 52 C69 56 62 62 58 75 M43 73 C52 70 66 70 77 73" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+                    <circle cx="60" cy="87" r="7" fill="currentColor"/>
+                </svg>
+                <div>
+                    <div class="brand-wordmark">N-Deavourservices</div>
+                    <div class="brand-tagline">Excellence through efficiency</div>
+                </div>
+            </div>
+            <div class="hero-kicker">Private financial agent</div>
+            <h1>Automated finance alignment for expenses, income, and tax readiness.</h1>
+            <p>Upload documents, track billable work, audit ledger categories, and ask focused questions from one branded workspace built around clarity and efficiency.</p>
             <div class="hero-palette">
                 <span class="swatch-mist"></span>
                 <span class="swatch-lavender"></span>
@@ -1219,7 +1270,7 @@ def render_document_memory(summary: dict[str, Any], tax_rate: float) -> None:
 def main() -> None:
     """Run the Streamlit application."""
 
-    st.set_page_config(page_title="Personal Financial Agent", page_icon=":moneybag:", layout="wide")
+    st.set_page_config(page_title="N-Deavourservices Financial Agent", page_icon=":moneybag:", layout="wide")
     init_state()
     render_global_styles()
     render_hero()
@@ -1245,7 +1296,7 @@ def main() -> None:
 
     with chat_tab:
         section_heading(
-            "Ask Phreedom",
+            "Ask N-Deavourservices",
             "Chat",
             "Use the remembered ledger, documents, and timesheet to ask direct financial questions.",
         )
