@@ -276,6 +276,38 @@ def append_transactions(transactions: pd.DataFrame) -> None:
     )
 
 
+def remembered_documents() -> list[dict[str, Any]]:
+    """Return stored document summaries as structured entries."""
+
+    documents = []
+    for index, item in enumerate(st.session_state.document_summaries, start=1):
+        if isinstance(item, dict):
+            documents.append(item)
+        else:
+            documents.append(
+                {
+                    "source": f"Document {index}",
+                    "summary": str(item),
+                    "transactions": None,
+                    "uploaded_at": "Earlier in this session",
+                }
+            )
+    return documents
+
+
+def remember_document(parsed: ParsedDocument) -> None:
+    """Store uploaded document memory as a clickable section entry."""
+
+    st.session_state.document_summaries.append(
+        {
+            "source": parsed.source,
+            "summary": parsed.summary,
+            "transactions": len(parsed.transactions),
+            "uploaded_at": datetime.now().strftime("%b %d, %Y %I:%M %p"),
+        }
+    )
+
+
 def financial_summary(ledger: pd.DataFrame, tax_rate: float) -> dict[str, Any]:
     """Calculate the user's current financial profile."""
 
@@ -313,14 +345,40 @@ def financial_summary(ledger: pd.DataFrame, tax_rate: float) -> dict[str, Any]:
     }
 
 
-def render_metrics(summary: dict[str, Any]) -> None:
-    """Render headline financial metrics."""
+def section_heading(title: str, eyebrow: str | None = None, body: str | None = None) -> None:
+    """Render a minimalist section heading."""
 
+    eyebrow_html = f'<div class="section-eyebrow">{eyebrow}</div>' if eyebrow else ""
+    body_html = f'<p class="section-body">{body}</p>' if body else ""
+    st.markdown(
+        f"""
+        <div class="section-heading">
+            {eyebrow_html}
+            <h2>{title}</h2>
+            {body_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metrics(summary: dict[str, Any]) -> None:
+    """Render headline financial metrics with simple cards."""
+
+    section_heading(
+        "Financial overview",
+        "Snapshot",
+        "A clean read on income, expenses, profit, and the current tax reserve recommendation.",
+    )
     income_col, expense_col, profit_col, tax_col = st.columns(4)
-    income_col.metric("Income", f"${summary['income']:,.2f}")
-    expense_col.metric("Expenses", f"${summary['expenses']:,.2f}")
-    profit_col.metric("Net profit", f"${summary['profit']:,.2f}")
-    tax_col.metric("Suggested tax reserve", f"${summary['tax_reserve']:,.2f}")
+    with income_col:
+        metric_card("Income", format_usd(summary["income"]))
+    with expense_col:
+        metric_card("Expenses", format_usd(summary["expenses"]))
+    with profit_col:
+        metric_card("Net profit", format_usd(summary["profit"]), summary["profit"])
+    with tax_col:
+        metric_card("Tax reserve", format_usd(summary["tax_reserve"]))
 
 
 def build_context(tax_rate: float, business_type: str, tax_notes: str) -> str:
@@ -334,7 +392,10 @@ def build_context(tax_rate: float, business_type: str, tax_notes: str) -> str:
         if not top_expenses.empty
         else "No expenses loaded."
     )
-    docs = "\n".join(f"- {item}" for item in st.session_state.document_summaries) or "No documents uploaded."
+    docs = (
+        "\n".join(f"- {doc.get('source', 'Document')}: {doc.get('summary', '')}" for doc in remembered_documents())
+        or "No documents uploaded."
+    )
 
     recent_transactions = (
         ledger.tail(12).to_string(index=False)
@@ -462,7 +523,7 @@ def render_uploads() -> None:
     """Render uploader and ingest new files into memory."""
 
     uploaded_files = st.file_uploader(
-        "Upload financial documents",
+        "Drop in CSV or PDF files",
         type=["csv", "pdf"],
         accept_multiple_files=True,
         help="CSV bank exports are normalized into transactions. PDFs are text-extracted and scanned for dated dollar rows.",
@@ -478,7 +539,7 @@ def render_uploads() -> None:
         try:
             parsed = parse_upload(uploaded_file)
             append_transactions(parsed.transactions)
-            st.session_state.document_summaries.append(parsed.summary)
+            remember_document(parsed)
             st.session_state.processed_files.add(file_key)
             st.success(parsed.summary)
         except Exception as exc:
@@ -646,68 +707,175 @@ def format_usd(amount: float) -> str:
 
 
 def metric_card(label: str, value: str, status_value: float | None = None) -> None:
-    """Render a dashboard metric card with screenshot-inspired colors."""
+    """Render a quiet metric card using the app palette."""
 
     status_class = "neutral"
     if status_value is not None:
         status_class = "positive" if status_value >= 0 else "negative"
     st.markdown(
         f"""
-        <div class="earnings-card {status_class}">
-            <div class="earnings-card-label">{label}</div>
-            <div class="earnings-card-value">{value}</div>
+        <div class="metric-card {status_class}">
+            <div class="metric-card-label">{label}</div>
+            <div class="metric-card-value">{value}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_earnings_styles() -> None:
-    """Add lightweight dashboard styling."""
+def render_global_styles() -> None:
+    """Apply a minimal Gemini-inspired visual system."""
 
     st.markdown(
         """
         <style>
-            .earnings-title {
-                color: #3b7f5b;
-                font-size: 2rem;
-                font-weight: 800;
-                letter-spacing: 0.03em;
-                margin-bottom: 0.75rem;
-                text-transform: uppercase;
+            :root {
+                --ph-bg: #fafafa;
+                --ph-ink: #1f2430;
+                --ph-muted: #667085;
+                --ph-line: #e6e9f0;
+                --ph-lavender: #b9a9d8;
+                --ph-blue: #9ec0d4;
+                --ph-green: #a9cc9b;
+                --ph-mist: #d7dcec;
+                --ph-card: rgba(255, 255, 255, 0.86);
             }
-            .timesheet-title {
-                color: #4735bf;
-                font-size: 1.8rem;
-                font-weight: 800;
-                letter-spacing: 0.03em;
-                margin: 1rem 0 0.5rem;
-                text-transform: uppercase;
+            .stApp {
+                background:
+                    radial-gradient(circle at 50% 0%, rgba(185, 169, 216, 0.32), transparent 32rem),
+                    linear-gradient(90deg, rgba(215, 220, 236, 0.38), rgba(185, 169, 216, 0.20), rgba(158, 192, 212, 0.22), rgba(169, 204, 155, 0.18)),
+                    var(--ph-bg);
+                color: var(--ph-ink);
             }
-            .earnings-card {
-                background: #fbfbfa;
-                border: 1px solid #d8ded8;
-                padding: 0.85rem 1rem;
-                min-height: 6rem;
+            .block-container {
+                max-width: 1180px;
+                padding-top: 3.25rem;
+                padding-bottom: 4rem;
+            }
+            h1, h2, h3 {
+                color: var(--ph-ink);
+                letter-spacing: -0.035em;
+            }
+            .hero {
+                max-width: 780px;
+                margin: 0 auto 3rem;
                 text-align: center;
             }
-            .earnings-card-label {
-                color: #4d6058;
+            .hero-kicker {
+                color: var(--ph-muted);
                 font-size: 0.82rem;
                 font-weight: 700;
-                margin-bottom: 0.35rem;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+                margin-bottom: 1rem;
             }
-            .earnings-card-value {
-                color: #4735bf;
-                font-size: 1.45rem;
-                font-weight: 800;
+            .hero h1 {
+                font-size: clamp(2.5rem, 6vw, 4.8rem);
+                font-weight: 500;
+                line-height: 1.02;
+                margin-bottom: 1rem;
             }
-            .earnings-card.positive .earnings-card-value { color: #3b7f5b; }
-            .earnings-card.negative .earnings-card-value { color: #cc4d3d; }
+            .hero p {
+                color: var(--ph-muted);
+                font-size: 1.05rem;
+                line-height: 1.7;
+                margin: 0 auto;
+                max-width: 640px;
+            }
+            .hero-palette {
+                display: flex;
+                gap: 0.45rem;
+                justify-content: center;
+                margin: 1.65rem auto 0;
+            }
+            .hero-palette span {
+                border-radius: 999px;
+                height: 0.5rem;
+                width: 4.8rem;
+            }
+            .swatch-mist { background: var(--ph-mist); }
+            .swatch-lavender { background: var(--ph-lavender); }
+            .swatch-blue { background: var(--ph-blue); }
+            .swatch-green { background: var(--ph-green); }
+            .section-heading { margin: 2.75rem 0 1.1rem; }
+            .section-heading h2 {
+                font-size: 1.55rem;
+                font-weight: 650;
+                margin: 0.2rem 0 0;
+            }
+            .section-eyebrow {
+                color: var(--ph-muted);
+                font-size: 0.78rem;
+                font-weight: 750;
+                letter-spacing: 0.14em;
+                text-transform: uppercase;
+            }
+            .section-body {
+                color: var(--ph-muted);
+                line-height: 1.65;
+                margin: 0.5rem 0 0;
+                max-width: 720px;
+            }
+            .metric-card {
+                background: var(--ph-card);
+                border: 1px solid rgba(230, 233, 240, 0.95);
+                border-radius: 1.35rem;
+                box-shadow: 0 18px 45px rgba(31, 36, 48, 0.055);
+                min-height: 7.25rem;
+                padding: 1.15rem 1.1rem;
+                text-align: left;
+            }
+            .metric-card-label {
+                color: var(--ph-muted);
+                font-size: 0.78rem;
+                font-weight: 750;
+                letter-spacing: 0.09em;
+                margin-bottom: 0.7rem;
+                text-transform: uppercase;
+            }
+            .metric-card-value {
+                color: #4b3ca7;
+                font-size: clamp(1.45rem, 2.4vw, 2rem);
+                font-weight: 650;
+                letter-spacing: -0.035em;
+            }
+            .metric-card.positive .metric-card-value { color: #557c4b; }
+            .metric-card.negative .metric-card-value { color: #a95b56; }
             .tracking-note {
-                color: #42584e;
-                font-size: 0.92rem;
-                margin-top: -0.25rem;
+                color: var(--ph-muted);
+                font-size: 0.95rem;
+                line-height: 1.6;
+                margin: 0.35rem 0 1.3rem;
+            }
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 0.5rem;
+                padding: 0.35rem;
+                background: rgba(255, 255, 255, 0.55);
+                border: 1px solid rgba(230, 233, 240, 0.9);
+                border-radius: 999px;
+            }
+            .stTabs [data-baseweb="tab"] {
+                border-radius: 999px;
+                color: var(--ph-muted);
+                padding: 0.65rem 1.05rem;
+            }
+            .stTabs [aria-selected="true"] {
+                background: white;
+                color: var(--ph-ink);
+                box-shadow: 0 8px 24px rgba(31, 36, 48, 0.08);
+            }
+            div[data-testid="stExpander"] {
+                background: rgba(255, 255, 255, 0.72);
+                border: 1px solid rgba(230, 233, 240, 0.95);
+                border-radius: 1.2rem;
+                box-shadow: 0 12px 35px rgba(31, 36, 48, 0.04);
+                margin-bottom: 0.8rem;
+            }
+            .stChatMessage {
+                background: rgba(255, 255, 255, 0.72);
+                border: 1px solid rgba(230, 233, 240, 0.86);
+                border-radius: 1.2rem;
+                padding: 0.7rem;
             }
         </style>
         """,
@@ -715,15 +883,22 @@ def render_earnings_styles() -> None:
     )
 
 
+def render_earnings_styles() -> None:
+    """Compatibility wrapper; global styles are rendered once from main."""
+
+
 def render_timesheet_dashboard() -> None:
     """Render the earnings dashboard and manual timesheet intake."""
 
-    render_earnings_styles()
-    st.markdown('<div class="earnings-title">Earnings Dashboard</div>', unsafe_allow_html=True)
+    section_heading(
+        "Earnings dashboard",
+        "Monthly target",
+        "Track hours, rates, and pay against the earnings pace needed to hit your monthly goal.",
+    )
 
-    settings_col, entry_col = st.columns([1, 1.3])
+    settings_col, entry_col = st.columns([1, 1.3], gap="large")
     with settings_col:
-        st.subheader("Target settings")
+        st.markdown("#### Target settings")
         monthly_target = st.number_input(
             "Monthly target pay (USD)",
             min_value=0.0,
@@ -743,7 +918,7 @@ def render_timesheet_dashboard() -> None:
         as_of = st.date_input("Dashboard as of", value=date.today())
 
     with entry_col:
-        st.subheader("Add hours worked")
+        st.markdown("#### Add hours worked")
         with st.form("timesheet_entry_form", clear_on_submit=True):
             work_date = st.date_input("Date", value=date.today())
             project = st.text_input("Project or client", placeholder="Client, contract, or workstream")
@@ -801,7 +976,7 @@ def render_timesheet_dashboard() -> None:
         month_sort = chart_data["month"].tolist()
         bars = (
             alt.Chart(chart_data)
-            .mark_bar(color="#7bd49b")
+            .mark_bar(color="#9ec0d4")
             .encode(
                 x=alt.X("month:N", sort=month_sort, title="Month"),
                 y=alt.Y("actual:Q", title="Earnings (USD)"),
@@ -810,7 +985,7 @@ def render_timesheet_dashboard() -> None:
         )
         target_line = (
             alt.Chart(chart_data)
-            .mark_line(color="#3b7f5b", strokeWidth=3)
+            .mark_line(color="#a9cc9b", strokeWidth=3)
             .encode(
                 x=alt.X("month:N", sort=month_sort),
                 y="target:Q",
@@ -836,7 +1011,7 @@ def render_timesheet_dashboard() -> None:
         )
         st.dataframe(tracking_rows, use_container_width=True, hide_index=True)
 
-    st.markdown('<div class="timesheet-title">Freelance Timesheet</div>', unsafe_allow_html=True)
+    section_heading("Freelance timesheet", "Entries", "A focused view of this month's remembered billable work.")
     summary_cols = st.columns(3)
     with summary_cols[0]:
         metric_card("Avg Billable Rate", format_usd(dashboard["avg_rate"]))
@@ -880,27 +1055,46 @@ def render_timesheet_dashboard() -> None:
         st.rerun()
 
 
-def main() -> None:
-    """Run the Streamlit application."""
+def render_hero() -> None:
+    """Render a quiet Gemini-inspired app introduction."""
 
-    st.set_page_config(page_title="Personal Financial Agent", page_icon=":moneybag:", layout="wide")
-    init_state()
-
-    st.title("Personal Financial Agent")
-    st.caption(
-        "Upload CSV or PDF financial documents, build an in-session financial profile, "
-        "and get chat-based planning guidance for expenses, income, and tax savings."
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-kicker">Phreedom financial agent</div>
+            <h1>Your money, clearly organized.</h1>
+            <p>Ask questions, upload documents, track billable work, and see whether your month is on pace without visual clutter.</p>
+            <div class="hero-palette">
+                <span class="swatch-mist"></span>
+                <span class="swatch-lavender"></span>
+                <span class="swatch-blue"></span>
+                <span class="swatch-green"></span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    with st.sidebar:
-        st.header("Financial profile")
-        business_type = st.text_input("Business or income type", placeholder="Freelancer, LLC, sole proprietor...")
-        tax_rate = st.slider("Tax savings reserve rate", 0, 50, 30, format="%d%%") / 100
-        tax_notes = st.text_area(
-            "Tax notes",
-            placeholder="State, filing status, estimated payments, payroll, deductions...",
-        )
-        if st.button("Clear financial memory"):
+
+def render_profile_controls() -> tuple[str, float, str]:
+    """Render compact profile controls and return selected settings."""
+
+    with st.expander("Profile settings", expanded=False):
+        settings_col, tax_col, notes_col = st.columns([1.1, 0.9, 1.4], gap="large")
+        with settings_col:
+            business_type = st.text_input(
+                "Business or income type",
+                placeholder="Freelancer, LLC, sole proprietor...",
+            )
+        with tax_col:
+            tax_rate = st.slider("Tax savings reserve rate", 0, 50, 30, format="%d%%") / 100
+        with notes_col:
+            tax_notes = st.text_area(
+                "Tax notes",
+                placeholder="State, filing status, estimated payments, payroll, deductions...",
+            )
+
+        if st.button("Clear all remembered financial data"):
             st.session_state.ledger = pd.DataFrame(columns=LEDGER_COLUMNS)
             st.session_state.document_summaries = []
             st.session_state.processed_files = set()
@@ -908,58 +1102,120 @@ def main() -> None:
             st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
             st.rerun()
 
+    return business_type, tax_rate, tax_notes
+
+
+def render_upload_section() -> None:
+    """Render the document intake area with clear hierarchy."""
+
+    section_heading(
+        "Document intake",
+        "Upload",
+        "Add bank exports, receipts, invoices, or tax PDFs. Each uploaded document becomes its own remembered section below.",
+    )
     render_uploads()
+
+
+def render_financial_profile(summary: dict[str, Any]) -> None:
+    """Render the ledger and expense categories in a clean section."""
+
+    section_heading(
+        "Financial profile",
+        "Ledger",
+        "Transactions remembered from uploads and timesheet entries.",
+    )
+    if st.session_state.ledger.empty:
+        st.info("Upload a CSV/PDF or add timesheet earnings to start building your profile.")
+        return
+
+    st.dataframe(st.session_state.ledger, use_container_width=True, hide_index=True)
+    if not summary["top_expenses"].empty:
+        section_heading("Expense categories", "Breakdown", "Your largest remembered expense categories.")
+        st.bar_chart(summary["top_expenses"].set_index("category"))
+
+    csv = st.session_state.ledger.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download remembered ledger",
+        csv,
+        file_name=f"financial-agent-ledger-{datetime.now().date()}.csv",
+        mime="text/csv",
+    )
+
+
+def render_document_memory(summary: dict[str, Any], tax_rate: float) -> None:
+    """Render stored documents as separate clickable sections."""
+
+    section_heading(
+        "Stored documents",
+        "Memory",
+        "Each upload is saved as a separate clickable section for quick review.",
+    )
+    documents = remembered_documents()
+    if not documents:
+        st.info("Upload documents to create separate memory sections here.")
+    else:
+        for index, document in enumerate(documents, start=1):
+            source = document.get("source") or f"Document {index}"
+            rows = document.get("transactions")
+            uploaded_at = document.get("uploaded_at") or "This session"
+            row_text = "No transaction rows" if rows in (None, 0) else f"{rows:,} transaction rows"
+            with st.expander(f"{source} - {row_text}", expanded=index == 1):
+                st.caption(f"Remembered {uploaded_at}")
+                st.write(document.get("summary", "No summary available."))
+
+    section_heading(
+        "Tax savings recommendation",
+        "Planning",
+        "A simple reserve estimate based on the currently remembered financial profile.",
+    )
+    if summary["profit"] > 0:
+        metric_card("Suggested reserve", format_usd(summary["tax_reserve"]))
+        st.markdown(
+            f"<p class='tracking-note'>Set aside {format_usd(summary['tax_reserve'])} from current net profit "
+            f"using your selected {tax_rate:.0%} reserve rate.</p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info(
+            "No positive taxable profit is currently loaded. Keep tracking income and expenses, "
+            "and reassess estimated taxes once the profile shows profit."
+        )
+    st.caption("Planning guidance only; not formal tax, legal, or accounting advice.")
+
+
+def main() -> None:
+    """Run the Streamlit application."""
+
+    st.set_page_config(page_title="Personal Financial Agent", page_icon=":moneybag:", layout="wide")
+    init_state()
+    render_global_styles()
+    render_hero()
+
+    business_type, tax_rate, tax_notes = render_profile_controls()
+    render_upload_section()
 
     summary = financial_summary(st.session_state.ledger, tax_rate)
     render_metrics(summary)
 
     earnings_tab, data_tab, memory_tab, chat_tab = st.tabs(
-        ["Earnings dashboard", "Financial profile", "Document memory", "Agent chat"]
+        ["Dashboard", "Ledger", "Documents", "Chat"]
     )
 
     with earnings_tab:
         render_timesheet_dashboard()
 
     with data_tab:
-        st.subheader("Loaded transaction ledger")
-        if st.session_state.ledger.empty:
-            st.info("Upload a CSV export or PDF statement to start building your financial profile.")
-        else:
-            st.dataframe(st.session_state.ledger, use_container_width=True, hide_index=True)
-            if not summary["top_expenses"].empty:
-                st.subheader("Largest expense categories")
-                st.bar_chart(summary["top_expenses"].set_index("category"))
-
-            csv = st.session_state.ledger.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download remembered ledger",
-                csv,
-                file_name=f"financial-agent-ledger-{datetime.now().date()}.csv",
-                mime="text/csv",
-            )
+        render_financial_profile(summary)
 
     with memory_tab:
-        st.subheader("Remembered documents")
-        if st.session_state.document_summaries:
-            for item in st.session_state.document_summaries:
-                st.markdown(f"- {item}")
-        else:
-            st.info("Document summaries will appear here after upload.")
-
-        st.subheader("Tax savings recommendation")
-        if summary["profit"] > 0:
-            st.markdown(
-                f"Set aside **${summary['tax_reserve']:,.2f}** from current net profit "
-                f"using your selected **{tax_rate:.0%}** reserve rate."
-            )
-        else:
-            st.markdown(
-                "No positive taxable profit is currently loaded. Keep tracking income and expenses, "
-                "and reassess estimated taxes once the profile shows profit."
-            )
-        st.caption("This app provides planning guidance, not formal tax, legal, or accounting advice.")
+        render_document_memory(summary, tax_rate)
 
     with chat_tab:
+        section_heading(
+            "Ask Phreedom",
+            "Chat",
+            "Use the remembered ledger, documents, and timesheet to ask direct financial questions.",
+        )
         render_chat(tax_rate, business_type, tax_notes)
 
 

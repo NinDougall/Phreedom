@@ -12,6 +12,7 @@ financial agent. It can:
 - Summarize business income, expenses, net profit, and major expense categories.
 - Recommend how much to set aside for taxes based on a configurable reserve rate.
 - Track freelance hours, rates, earnings, and monthly target progress in an earnings dashboard.
+- Use a clean, minimalist interface with separate clickable sections for stored documents.
 
 ### Run locally
 
@@ -38,3 +39,9 @@ worked, and hourly rate. The app stores those entries as remembered billable
 income and compares monthly progress against a configurable target pay and base
 hourly rate. It shows total earnings, total hours, average billable rate,
 expected earnings by today, hours ahead/behind, and previous-month hour gaps.
+
+### Stored documents
+
+Uploaded CSV and PDF files are remembered as separate clickable sections in the
+**Documents** tab. Each section shows the source file, upload time, extracted row
+count, and document summary.
