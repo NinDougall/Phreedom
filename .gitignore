@@ -1,5 +1,6 @@
-.streamlit/secrets.toml
-.venv/
+.ndeavour_profile/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.streamlit/secrets.toml
+.venv/
