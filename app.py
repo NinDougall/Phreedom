@@ -1,266 +1,880 @@
-"""N-Deavour Alignment: premium private financial agent interface.
+"""Streamlit personal financial agent.
 
-A clean Streamlit front-end for sensitive expense tracking, tax modeling, and
-bookkeeping workflows. The app is intentionally modular and mock-backed so the
-interface is immediately interactive while backend services evolve.
+The app keeps an in-session financial memory built from uploaded CSV and PDF
+documents, then uses that profile to answer chat questions and recommend tax
+savings. It can use an OpenAI-compatible model when OPENAI_API_KEY is present
+and falls back to deterministic local analysis otherwise.
 """
 
 from __future__ import annotations
 
+import calendar
 import io
+import os
+import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from pypdf import PdfReader
 
 
-APP_SECTIONS = ["Dashboard", "Document Ingestion", "Ledger Management", "Agent Workspace"]
-LEDGER_COLUMNS = [
-    "date",
-    "vendor",
-    "description",
-    "category",
-    "subcategory",
-    "amount",
-    "type",
-    "tax_status",
-    "source",
-]
-CATEGORY_OPTIONS = [
-    "",
-    "Revenue",
-    "Software",
-    "Contractors",
-    "Travel",
-    "Meals",
-    "Office",
-    "Bank Fees",
-    "Taxes",
-    "Owner Draw",
-    "Uncategorized",
-]
-SUBCATEGORY_OPTIONS = {
-    "": [""],
-    "Revenue": ["", "Client Services", "Retainer", "Product Sales", "Interest"],
-    "Software": ["", "AI Tools", "Cloud Hosting", "Subscriptions", "Security"],
-    "Contractors": ["", "Engineering", "Design", "Operations", "Accounting"],
-    "Travel": ["", "Airfare", "Ground Transport", "Hotel", "Mileage"],
-    "Meals": ["", "Client Meals", "Team Meals", "Coffee"],
-    "Office": ["", "Equipment", "Supplies", "Coworking"],
-    "Bank Fees": ["", "Processing", "Wire Fees", "Monthly Fees"],
-    "Taxes": ["", "Estimated Tax", "Payroll Tax", "Sales Tax"],
-    "Owner Draw": ["", "Distribution", "Reimbursement"],
-    "Uncategorized": ["", "Needs Review"],
-}
-TAX_STATUS_OPTIONS = ["", "Deductible", "Partially deductible", "Non-deductible", "Needs review"]
-TYPE_OPTIONS = ["", "Income", "Expense", "Transfer"]
+LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
+TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
+CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
+DATE_RE = re.compile(
+    r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b)"
+)
 
 
-# -----------------------------------------------------------------------------
-# State and mock data
-# -----------------------------------------------------------------------------
+@dataclass
+class ParsedDocument:
+    """Structured output from an uploaded file."""
 
-
-def seed_mock_ledger() -> pd.DataFrame:
-    """Create a realistic, immediately interactive mock ledger."""
-
-    rows = [
-        ["2026-05-01", "Northstar Studio", "Client retainer", "Revenue", "Retainer", 5200.00, "Income", "Needs review", "Mock ledger"],
-        ["2026-05-03", "OpenAI", "AI workflow tooling", "Software", "AI Tools", -240.00, "Expense", "Deductible", "Mock ledger"],
-        ["2026-05-04", "Linear", "Project management", "Software", "Subscriptions", -39.00, "Expense", "Deductible", "Mock ledger"],
-        ["2026-05-07", "Mercury", "Wire transfer fee", "Bank Fees", "Wire Fees", -18.00, "Expense", "Deductible", "Mock ledger"],
-        ["2026-05-09", "Figma", "Design systems", "Software", "Subscriptions", -45.00, "Expense", "Deductible", "Mock ledger"],
-        ["2026-05-12", "Atlas Contractors", "Backend automation support", "Contractors", "Engineering", -1320.00, "Expense", "Deductible", "Mock ledger"],
-        ["2026-05-16", "Delta", "Client onsite travel", "Travel", "Airfare", -410.00, "Expense", "Partially deductible", "Mock ledger"],
-        ["2026-05-17", "Blue Bottle", "Client meeting", "Meals", "Client Meals", -64.80, "Expense", "Partially deductible", "Mock ledger"],
-        ["2026-05-20", "Northstar Studio", "Implementation milestone", "Revenue", "Client Services", 3800.00, "Income", "Needs review", "Mock ledger"],
-        ["2026-05-22", "IRS EFTPS", "Federal estimated tax", "Taxes", "Estimated Tax", -1250.00, "Expense", "Non-deductible", "Mock ledger"],
-    ]
-    ledger = pd.DataFrame(rows, columns=LEDGER_COLUMNS)
-    ledger["date"] = pd.to_datetime(ledger["date"]).dt.date
-    return ledger
+    source: str
+    transactions: pd.DataFrame
+    summary: str
 
 
 def init_state() -> None:
-    """Initialize all user interaction state in Streamlit session memory."""
+    """Initialize Streamlit session memory."""
 
-    if "active_section" not in st.session_state:
-        st.session_state.active_section = "Dashboard"
     if "ledger" not in st.session_state:
-        st.session_state.ledger = seed_mock_ledger()
-    if "uploaded_documents" not in st.session_state:
-        st.session_state.uploaded_documents = []
-    if "processed_upload_keys" not in st.session_state:
-        st.session_state.processed_upload_keys = set()
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = [
+        st.session_state.ledger = pd.DataFrame(columns=LEDGER_COLUMNS)
+    if "document_summaries" not in st.session_state:
+        st.session_state.document_summaries = []
+    if "processed_files" not in st.session_state:
+        st.session_state.processed_files = set()
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
             {
                 "role": "assistant",
-                "content": "N-Deavour is ready. Ask about burn, deductions, tax runway, or ledger anomalies.",
+                "content": (
+                    "Hi, I am your financial agent. Upload bank exports, "
+                    "expense reports, invoices, or tax PDFs, then ask me about "
+                    "income, expenses, cash flow, and tax savings."
+                ),
             }
         ]
-    if "tax_reserve_balance" not in st.session_state:
-        st.session_state.tax_reserve_balance = 14800.00
-    if "target_tax_rate" not in st.session_state:
-        st.session_state.target_tax_rate = 0.30
+    if "timesheet" not in st.session_state:
+        st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
 
 
-# -----------------------------------------------------------------------------
-# Styling and layout primitives
-# -----------------------------------------------------------------------------
+def infer_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
+    """Find a likely column name by comparing normalized tokens."""
+
+    normalized = {column.lower().strip().replace("_", " "): column for column in columns}
+    for candidate in candidates:
+        candidate = candidate.lower()
+        for normalized_name, original_name in normalized.items():
+            if candidate == normalized_name or candidate in normalized_name:
+                return original_name
+    return None
 
 
-def apply_design_system() -> None:
-    """Apply N-Deavour design tokens and minimal structural styling."""
+def coerce_money(value: Any) -> float:
+    """Convert common accounting/currency formats to a signed float."""
+
+    if pd.isna(value):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+    if not text:
+        return 0.0
+
+    is_negative = text.startswith("(") and text.endswith(")")
+    text = text.replace("(", "").replace(")", "")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if text in {"", "-", "."}:
+        return 0.0
+
+    amount = float(text)
+    return -abs(amount) if is_negative else amount
+
+
+def classify_kind(amount: float, explicit_value: Any = None) -> str:
+    """Classify a transaction as income or expense."""
+
+    if explicit_value is not None and not pd.isna(explicit_value):
+        text = str(explicit_value).lower()
+        if any(token in text for token in ("income", "revenue", "deposit", "credit")):
+            return "income"
+        if any(token in text for token in ("expense", "debit", "withdrawal", "payment")):
+            return "expense"
+    return "income" if amount >= 0 else "expense"
+
+
+def normalize_csv(file_name: str, data: bytes) -> ParsedDocument:
+    """Read a CSV and normalize it into the app ledger schema."""
+
+    raw = pd.read_csv(io.BytesIO(data))
+    if raw.empty:
+        return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), "CSV was empty.")
+
+    columns = list(raw.columns)
+    date_col = infer_column(columns, ("date", "posted", "transaction date", "created"))
+    description_col = infer_column(
+        columns,
+        ("description", "memo", "vendor", "merchant", "payee", "name", "details"),
+    )
+    category_col = infer_column(columns, ("category", "account", "type", "class"))
+    kind_col = infer_column(columns, ("kind", "transaction type", "type"))
+    amount_col = infer_column(columns, ("amount", "total", "net"))
+    debit_col = infer_column(columns, ("debit", "withdrawal", "spent", "charge"))
+    credit_col = infer_column(columns, ("credit", "deposit", "received", "income"))
+
+    if amount_col:
+        amounts = raw[amount_col].map(coerce_money)
+    elif debit_col or credit_col:
+        debits = raw[debit_col].map(coerce_money) if debit_col else 0
+        credits = raw[credit_col].map(coerce_money) if credit_col else 0
+        amounts = pd.Series(credits, index=raw.index).fillna(0) - pd.Series(debits, index=raw.index).fillna(0)
+    else:
+        numeric_columns = raw.select_dtypes(include="number").columns.tolist()
+        if not numeric_columns:
+            raise ValueError("No amount, debit/credit, or numeric column could be found.")
+        amount_col = numeric_columns[0]
+        amounts = raw[amount_col].map(coerce_money)
+
+    dates = pd.to_datetime(raw[date_col], errors="coerce").dt.date if date_col else pd.NaT
+    descriptions = raw[description_col].fillna("Imported transaction") if description_col else "Imported transaction"
+    categories = raw[category_col].fillna("Uncategorized") if category_col else "Uncategorized"
+
+    ledger = pd.DataFrame(
+        {
+            "date": dates,
+            "description": descriptions,
+            "amount": amounts,
+            "kind": [
+                classify_kind(amount, raw.loc[index, kind_col] if kind_col else None)
+                for index, amount in amounts.items()
+            ],
+            "category": categories,
+            "source": file_name,
+        }
+    )
+    ledger["amount"] = ledger.apply(
+        lambda row: abs(row["amount"]) if row["kind"] == "income" else -abs(row["amount"]),
+        axis=1,
+    )
+
+    income = ledger.loc[ledger["kind"] == "income", "amount"].sum()
+    expenses = abs(ledger.loc[ledger["kind"] == "expense", "amount"].sum())
+    summary = (
+        f"Imported {len(ledger):,} CSV transactions from {file_name}: "
+        f"${income:,.2f} income and ${expenses:,.2f} expenses."
+    )
+    return ParsedDocument(file_name, ledger[LEDGER_COLUMNS], summary)
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """Extract text from a PDF upload."""
+
+    reader = PdfReader(io.BytesIO(data))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    return "\n".join(pages)
+
+
+def parse_pdf_transactions(file_name: str, text: str) -> pd.DataFrame:
+    """Best-effort extraction of dated money lines from statements or invoices."""
+
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        date_match = DATE_RE.search(line)
+        amounts = CURRENCY_RE.findall(line)
+        if not date_match or not amounts:
+            continue
+
+        raw_amount = amounts[-1]
+        amount = coerce_money(raw_amount)
+        lower_line = line.lower()
+        if any(token in lower_line for token in ("invoice", "payment received", "deposit", "revenue")):
+            kind = "income"
+            amount = abs(amount)
+        elif any(token in lower_line for token in ("fee", "charge", "purchase", "withdrawal", "debit", "expense")):
+            kind = "expense"
+            amount = -abs(amount)
+        else:
+            kind = classify_kind(amount)
+            amount = abs(amount) if kind == "income" else -abs(amount)
+
+        description = re.sub(r"\s+", " ", line).strip()
+        rows.append(
+            {
+                "date": pd.to_datetime(date_match.group("date"), errors="coerce").date(),
+                "description": description[:240],
+                "amount": amount,
+                "kind": kind,
+                "category": "PDF extracted",
+                "source": file_name,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=LEDGER_COLUMNS)
+
+
+def summarize_pdf(file_name: str, text: str, ledger: pd.DataFrame) -> str:
+    """Create an in-memory note for an uploaded PDF."""
+
+    amounts = [coerce_money(match) for match in CURRENCY_RE.findall(text)]
+    keyword_hits = sorted(
+        {
+            keyword
+            for keyword in (
+                "1099",
+                "w-2",
+                "invoice",
+                "receipt",
+                "deduction",
+                "sales tax",
+                "estimated tax",
+                "payroll",
+                "mileage",
+            )
+            if keyword in text.lower()
+        }
+    )
+    largest_amounts = sorted((abs(amount) for amount in amounts), reverse=True)[:5]
+    amount_summary = ", ".join(f"${amount:,.2f}" for amount in largest_amounts) or "no dollar amounts"
+    keyword_summary = ", ".join(keyword_hits) if keyword_hits else "no tax keywords detected"
+
+    return (
+        f"Read PDF {file_name}: extracted {len(text):,} characters, "
+        f"{len(ledger):,} dated transaction-like rows, largest amounts {amount_summary}, "
+        f"and {keyword_summary}."
+    )
+
+
+def parse_upload(uploaded_file: Any) -> ParsedDocument:
+    """Parse a Streamlit uploaded file into financial memory."""
+
+    data = uploaded_file.getvalue()
+    file_name = uploaded_file.name
+    extension = file_name.rsplit(".", 1)[-1].lower()
+
+    if extension == "csv":
+        return normalize_csv(file_name, data)
+    if extension == "pdf":
+        text = extract_pdf_text(data)
+        ledger = parse_pdf_transactions(file_name, text)
+        return ParsedDocument(file_name, ledger, summarize_pdf(file_name, text, ledger))
+    raise ValueError(f"Unsupported file type: {extension}")
+
+
+def append_transactions(transactions: pd.DataFrame) -> None:
+    """Merge new transaction rows into session memory."""
+
+    if transactions.empty:
+        return
+    st.session_state.ledger = pd.concat(
+        [st.session_state.ledger, transactions[LEDGER_COLUMNS]], ignore_index=True
+    )
+
+
+def remembered_documents() -> list[dict[str, Any]]:
+    """Return stored document summaries as structured entries."""
+
+    documents = []
+    for index, item in enumerate(st.session_state.document_summaries, start=1):
+        if isinstance(item, dict):
+            documents.append(item)
+        else:
+            documents.append(
+                {
+                    "source": f"Document {index}",
+                    "summary": str(item),
+                    "transactions": None,
+                    "uploaded_at": "Earlier in this session",
+                }
+            )
+    return documents
+
+
+def remember_document(parsed: ParsedDocument) -> None:
+    """Store uploaded document memory as a clickable section entry."""
+
+    st.session_state.document_summaries.append(
+        {
+            "source": parsed.source,
+            "summary": parsed.summary,
+            "transactions": len(parsed.transactions),
+            "uploaded_at": datetime.now().strftime("%b %d, %Y %I:%M %p"),
+        }
+    )
+
+
+def financial_summary(ledger: pd.DataFrame, tax_rate: float) -> dict[str, Any]:
+    """Calculate the user's current financial profile."""
+
+    if ledger.empty:
+        return {
+            "income": 0.0,
+            "expenses": 0.0,
+            "profit": 0.0,
+            "tax_reserve": 0.0,
+            "transactions": 0,
+            "top_expenses": pd.DataFrame(columns=["category", "amount"]),
+        }
+
+    income = float(ledger.loc[ledger["kind"] == "income", "amount"].sum())
+    expenses = float(abs(ledger.loc[ledger["kind"] == "expense", "amount"].sum()))
+    profit = income - expenses
+    tax_reserve = max(profit, 0) * tax_rate
+    top_expenses = (
+        ledger.loc[ledger["kind"] == "expense"]
+        .assign(amount=lambda frame: frame["amount"].abs())
+        .groupby("category", dropna=False)["amount"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(8)
+        .reset_index()
+    )
+
+    return {
+        "income": income,
+        "expenses": expenses,
+        "profit": profit,
+        "tax_reserve": tax_reserve,
+        "transactions": len(ledger),
+        "top_expenses": top_expenses,
+    }
+
+
+def section_heading(title: str, eyebrow: str | None = None, body: str | None = None) -> None:
+    """Render a minimalist section heading."""
+
+    eyebrow_html = f'<div class="section-eyebrow">{eyebrow}</div>' if eyebrow else ""
+    body_html = f'<p class="section-body">{body}</p>' if body else ""
+    st.markdown(
+        f"""
+        <div class="section-heading">
+            {eyebrow_html}
+            <h2>{title}</h2>
+            {body_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metrics(summary: dict[str, Any]) -> None:
+    """Render headline financial metrics with simple cards."""
+
+    section_heading(
+        "Financial overview",
+        "Snapshot",
+        "A clean read on income, expenses, profit, and the current tax reserve recommendation.",
+    )
+    income_col, expense_col, profit_col, tax_col = st.columns(4)
+    with income_col:
+        metric_card("Income", format_usd(summary["income"]))
+    with expense_col:
+        metric_card("Expenses", format_usd(summary["expenses"]))
+    with profit_col:
+        metric_card("Net profit", format_usd(summary["profit"]), summary["profit"])
+    with tax_col:
+        metric_card("Tax reserve", format_usd(summary["tax_reserve"]))
+
+
+def build_context(tax_rate: float, business_type: str, tax_notes: str) -> str:
+    """Create compact context for LLM or fallback responses."""
+
+    ledger = st.session_state.ledger
+    summary = financial_summary(ledger, tax_rate)
+    top_expenses = summary["top_expenses"]
+    top_expense_text = (
+        top_expenses.to_string(index=False, formatters={"amount": "${:,.2f}".format})
+        if not top_expenses.empty
+        else "No expenses loaded."
+    )
+    docs = (
+        "\n".join(f"- {doc.get('source', 'Document')}: {doc.get('summary', '')}" for doc in remembered_documents())
+        or "No documents uploaded."
+    )
+
+    recent_transactions = (
+        ledger.tail(12).to_string(index=False)
+        if not ledger.empty
+        else "No transaction rows available."
+    )
+
+    return f"""
+Business type: {business_type or "Not specified"}
+Tax notes: {tax_notes or "None"}
+Tax reserve rate: {tax_rate:.0%}
+Transactions: {summary["transactions"]}
+Income: ${summary["income"]:,.2f}
+Expenses: ${summary["expenses"]:,.2f}
+Net profit: ${summary["profit"]:,.2f}
+Suggested tax reserve: ${summary["tax_reserve"]:,.2f}
+
+Top expenses by category:
+{top_expense_text}
+
+Document memory:
+{docs}
+
+Recent transactions:
+{recent_transactions}
+""".strip()
+
+
+def fallback_response(prompt: str, context: str, tax_rate: float) -> str:
+    """Rule-based advisor used when no model API key is configured."""
+
+    summary = financial_summary(st.session_state.ledger, tax_rate)
+    top_expenses = summary["top_expenses"]
+    question = prompt.lower()
+
+    tax_guidance = (
+        f"Based on the loaded profile, net profit is ${summary['profit']:,.2f}. "
+        f"At a {tax_rate:.0%} reserve rate, set aside ${summary['tax_reserve']:,.2f} "
+        "in a separate tax savings account. Revisit the rate with a tax professional "
+        "if your filing status, entity type, state taxes, or payroll situation changes."
+    )
+
+    if "tax" in question or "set aside" in question or "save" in question:
+        return tax_guidance
+    if "expense" in question or "spend" in question or "category" in question:
+        if top_expenses.empty:
+            return "I do not have expense data yet. Upload a CSV or PDF statement so I can analyze categories."
+        lines = [
+            f"- {row.category}: ${row.amount:,.2f}"
+            for row in top_expenses.itertuples(index=False)
+        ]
+        return "Your largest expense categories are:\n" + "\n".join(lines) + "\n\n" + tax_guidance
+    if "income" in question or "revenue" in question:
+        return (
+            f"I found ${summary['income']:,.2f} in income across "
+            f"{summary['transactions']:,} loaded transactions. {tax_guidance}"
+        )
+    if "summary" in question or "profit" in question or "cash" in question:
+        return (
+            f"Financial summary: income ${summary['income']:,.2f}, expenses "
+            f"${summary['expenses']:,.2f}, net profit ${summary['profit']:,.2f}. "
+            f"{tax_guidance}"
+        )
+
+    return (
+        "Here is what I know from your current financial memory:\n\n"
+        f"{context}\n\n"
+        "Ask about taxes, expenses, income, profit, or uploaded documents for a more focused answer."
+    )
+
+
+def get_openai_key() -> str | None:
+    """Read an OpenAI key from Streamlit secrets or environment variables."""
+
+    key = None
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")  # type: ignore[union-attr]
+    except Exception:
+        pass
+    return key or os.getenv("OPENAI_API_KEY")
+
+
+def generate_agent_response(prompt: str, tax_rate: float, business_type: str, tax_notes: str) -> str:
+    """Answer a chat prompt using the financial memory."""
+
+    context = build_context(tax_rate, business_type, tax_notes)
+    api_key = get_openai_key()
+    if not api_key:
+        return fallback_response(prompt, context, tax_rate)
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        conversation = st.session_state.messages[-10:]
+        if not conversation or conversation[-1].get("role") != "user" or conversation[-1].get("content") != prompt:
+            conversation = [*conversation, {"role": "user", "content": prompt}]
+
+        response = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a careful personal financial agent for a small business owner. "
+                        "Use only the provided financial memory. Be specific with calculations, "
+                        "recommend practical next steps, and include a brief disclaimer that this "
+                        "is planning guidance rather than formal tax advice."
+                    ),
+                },
+                {"role": "system", "content": f"Financial memory:\n{context}"},
+                *conversation,
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or "I could not generate a response."
+    except Exception as exc:
+        return (
+            fallback_response(prompt, context, tax_rate)
+            + f"\n\nModel call failed, so I used local analysis instead. Error: {exc}"
+        )
+
+
+def render_uploads() -> None:
+    """Render uploader and ingest new files into memory."""
+
+    uploaded_files = st.file_uploader(
+        "Drop in CSV or PDF files",
+        type=["csv", "pdf"],
+        accept_multiple_files=True,
+        help="CSV bank exports are normalized into transactions. PDFs are text-extracted and scanned for dated dollar rows.",
+    )
+
+    if not uploaded_files:
+        return
+
+    for uploaded_file in uploaded_files:
+        file_key = f"{uploaded_file.name}:{uploaded_file.size}"
+        if file_key in st.session_state.processed_files:
+            continue
+        try:
+            parsed = parse_upload(uploaded_file)
+            append_transactions(parsed.transactions)
+            remember_document(parsed)
+            st.session_state.processed_files.add(file_key)
+            st.success(parsed.summary)
+        except Exception as exc:
+            st.error(f"Could not process {uploaded_file.name}: {exc}")
+
+
+def render_chat(tax_rate: float, business_type: str, tax_notes: str) -> None:
+    """Render chat history and process new prompts."""
+
+    st.subheader("Chat with your financial agent")
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    prompt = st.chat_input("Ask about expenses, income, taxes, cash flow, or uploaded files")
+    if not prompt:
+        return
+
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Reviewing your financial memory..."):
+            answer = generate_agent_response(prompt, tax_rate, business_type, tax_notes)
+        st.markdown(answer)
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+
+
+def month_start_end(as_of: date) -> tuple[date, date, int]:
+    """Return first day, last day, and day count for the selected month."""
+
+    month_days = calendar.monthrange(as_of.year, as_of.month)[1]
+    return date(as_of.year, as_of.month, 1), date(as_of.year, as_of.month, month_days), month_days
+
+
+def normalized_timesheet(timesheet: pd.DataFrame) -> pd.DataFrame:
+    """Return timesheet entries with stable types for calculations."""
+
+    if timesheet.empty:
+        return pd.DataFrame(columns=TIMESHEET_COLUMNS)
+
+    normalized = timesheet.copy()
+    normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce").dt.date
+    normalized["hours"] = pd.to_numeric(normalized["hours"], errors="coerce").fillna(0.0)
+    normalized["rate"] = pd.to_numeric(normalized["rate"], errors="coerce").fillna(0.0)
+    normalized["total_pay"] = pd.to_numeric(normalized["total_pay"], errors="coerce").fillna(
+        normalized["hours"] * normalized["rate"]
+    )
+    return normalized.dropna(subset=["date"])
+
+
+def earnings_dashboard_summary(
+    timesheet: pd.DataFrame,
+    monthly_target: float,
+    base_rate: float,
+    as_of: date,
+) -> dict[str, Any]:
+    """Calculate progress toward monthly earnings and hours targets."""
+
+    entries = normalized_timesheet(timesheet)
+    month_start, month_end, month_days = month_start_end(as_of)
+    elapsed_days = min(max(as_of.day, 1), month_days)
+    elapsed_ratio = elapsed_days / month_days
+
+    current_month = entries[
+        (entries["date"] >= month_start) & (entries["date"] <= min(as_of, month_end))
+    ]
+    ytd_entries = entries[(pd.to_datetime(entries["date"]).dt.year == as_of.year) & (entries["date"] <= as_of)]
+
+    prev_month = 12 if as_of.month == 1 else as_of.month - 1
+    prev_year = as_of.year - 1 if as_of.month == 1 else as_of.year
+    prev_entries = entries[
+        (pd.to_datetime(entries["date"]).dt.year == prev_year)
+        & (pd.to_datetime(entries["date"]).dt.month == prev_month)
+    ]
+
+    expected_month_hours = monthly_target / base_rate if base_rate > 0 else 0.0
+    actual_hours = float(current_month["hours"].sum())
+    actual_pay = float(current_month["total_pay"].sum())
+    avg_rate = actual_pay / actual_hours if actual_hours else 0.0
+    expected_hours_to_date = expected_month_hours * elapsed_ratio
+    expected_earnings_to_date = monthly_target * elapsed_ratio
+    prev_hours_gap = float(prev_entries["hours"].sum()) - expected_month_hours
+
+    monthly_actual = (
+        ytd_entries.assign(month_number=pd.to_datetime(ytd_entries["date"]).dt.month)
+        .groupby("month_number")["total_pay"]
+        .sum()
+        if not ytd_entries.empty
+        else pd.Series(dtype="float64")
+    )
+    monthly_chart = pd.DataFrame(
+        {
+            "month_number": range(1, 13),
+            "month": [date(as_of.year, month, 1).strftime("%b") for month in range(1, 13)],
+        }
+    )
+    monthly_chart["actual"] = monthly_chart["month_number"].map(monthly_actual).fillna(0.0)
+    monthly_chart["target"] = monthly_target
+
+    return {
+        "month_start": month_start,
+        "month_end": month_end,
+        "elapsed_ratio": elapsed_ratio,
+        "monthly_target": monthly_target,
+        "annual_target": monthly_target * 12,
+        "base_rate": base_rate,
+        "expected_month_hours": expected_month_hours,
+        "expected_hours_to_date": expected_hours_to_date,
+        "actual_hours": actual_hours,
+        "avg_rate": avg_rate,
+        "actual_pay": actual_pay,
+        "ytd_pay": float(ytd_entries["total_pay"].sum()),
+        "expected_earnings_to_date": expected_earnings_to_date,
+        "earnings_to_date_gap": actual_pay - expected_earnings_to_date,
+        "earnings_vs_base_rate": actual_pay - (actual_hours * base_rate),
+        "hours_gap": actual_hours - expected_hours_to_date,
+        "prev_month_hours_gap": prev_hours_gap,
+        "current_month_entries": current_month.sort_values("date"),
+        "monthly_chart": monthly_chart,
+    }
+
+
+def add_timesheet_entry(entry_date: date, project: str, hours: float, rate: float) -> None:
+    """Remember a manual earnings entry in both the timesheet and ledger."""
+
+    project_name = project.strip() or "Billable work"
+    total_pay = round(hours * rate, 2)
+    timesheet_row = pd.DataFrame(
+        [
+            {
+                "date": entry_date,
+                "project": project_name,
+                "hours": hours,
+                "rate": rate,
+                "total_pay": total_pay,
+            }
+        ],
+        columns=TIMESHEET_COLUMNS,
+    )
+    st.session_state.timesheet = pd.concat([st.session_state.timesheet, timesheet_row], ignore_index=True)
+
+    ledger_row = pd.DataFrame(
+        [
+            {
+                "date": entry_date,
+                "description": f"Timesheet earnings: {project_name}",
+                "amount": total_pay,
+                "kind": "income",
+                "category": "Billable income",
+                "source": "Timesheet",
+            }
+        ],
+        columns=LEDGER_COLUMNS,
+    )
+    append_transactions(ledger_row)
+
+
+def format_usd(amount: float) -> str:
+    """Format USD values with the minus sign before the dollar sign."""
+
+    return f"-${abs(amount):,.2f}" if amount < 0 else f"${amount:,.2f}"
+
+
+def metric_card(label: str, value: str, status_value: float | None = None) -> None:
+    """Render a quiet metric card using the app palette."""
+
+    status_class = "neutral"
+    if status_value is not None:
+        status_class = "positive" if status_value >= 0 else "negative"
+    st.markdown(
+        f"""
+        <div class="metric-card {status_class}">
+            <div class="metric-card-label">{label}</div>
+            <div class="metric-card-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_global_styles() -> None:
+    """Apply a high-contrast, minimal visual system without hiding functionality."""
 
     st.markdown(
         """
         <style>
             :root {
-                --accent: #0D7A87;
-                --slate: #1E293B;
-                --bg: #F8FAFC;
-                --card: #FFFFFF;
-                --border: #E2E8F0;
-                --text: #0F172A;
-                --muted: #64748B;
+                --ph-bg: #F8FAFC;
+                --ph-ink: #0F172A;
+                --ph-muted: #475569;
+                --ph-line: #CBD5E1;
+                --ph-card: #FFFFFF;
+                --ph-accent: #0D7A87;
+                --ph-accent-dark: #0A626D;
+                --ph-positive: #166534;
+                --ph-negative: #991B1B;
             }
             .stApp {
-                background: var(--bg);
-                color: var(--text);
+                background: var(--ph-bg);
+                color: var(--ph-ink);
             }
             .block-container {
-                max-width: 1220px;
-                padding: 3.2rem 3.5rem 5rem;
+                max-width: 1180px;
+                padding: 3rem 3rem 4rem;
             }
-            [data-testid="stSidebar"] {
-                background: #FFFFFF;
-                border-right: 1px solid var(--border);
-            }
-            [data-testid="stSidebar"] * {
-                color: var(--slate);
+            h1, h2, h3, h4, h5, h6, p, label, span {
+                color: var(--ph-ink);
             }
             h1, h2, h3 {
-                color: var(--text);
                 letter-spacing: -0.035em;
             }
-            .ndeavour-kicker {
-                color: var(--accent);
-                font-size: 0.76rem;
-                font-weight: 700;
+            .hero {
+                background: var(--ph-card);
+                border: 1px solid var(--ph-line);
+                border-radius: 1.25rem;
+                margin: 0 0 2.5rem;
+                padding: clamp(2rem, 5vw, 4rem);
+                text-align: left;
+            }
+            .hero-kicker {
+                color: var(--ph-accent-dark);
+                font-size: 0.82rem;
+                font-weight: 800;
                 letter-spacing: 0.16em;
-                margin-bottom: 0.9rem;
+                margin-bottom: 1rem;
                 text-transform: uppercase;
             }
-            .ndeavour-title {
-                color: var(--text);
-                font-size: clamp(2.2rem, 5vw, 4.4rem);
-                font-weight: 520;
-                line-height: 1.02;
-                margin: 0;
+            .hero h1 {
+                color: var(--ph-ink);
+                font-size: clamp(2.35rem, 5vw, 4.2rem);
+                font-weight: 650;
+                line-height: 1.04;
+                margin-bottom: 1rem;
+                max-width: 820px;
             }
-            .ndeavour-subtitle {
-                color: var(--muted);
-                font-size: 1.02rem;
-                line-height: 1.75;
-                margin-top: 1.1rem;
+            .hero p {
+                color: var(--ph-muted);
+                font-size: 1.08rem;
+                line-height: 1.7;
+                margin: 0;
                 max-width: 680px;
             }
-            .section-header {
-                margin: 3.4rem 0 1.3rem;
+            .hero-palette {
+                display: none;
             }
-            .section-header h2 {
-                font-size: 1.55rem;
-                font-weight: 630;
-                margin: 0.15rem 0 0;
+            .section-heading { margin: 2.75rem 0 1.15rem; }
+            .section-heading h2 {
+                color: var(--ph-ink);
+                font-size: 1.6rem;
+                font-weight: 700;
+                margin: 0.2rem 0 0;
             }
-            .section-header p {
-                color: var(--muted);
-                font-size: 0.98rem;
-                line-height: 1.7;
-                margin: 0.55rem 0 0;
+            .section-eyebrow {
+                color: var(--ph-accent-dark);
+                font-size: 0.78rem;
+                font-weight: 800;
+                letter-spacing: 0.14em;
+                text-transform: uppercase;
+            }
+            .section-body {
+                color: var(--ph-muted);
+                font-size: 1rem;
+                line-height: 1.65;
+                margin: 0.5rem 0 0;
                 max-width: 760px;
             }
-            .card {
-                background: var(--card);
-                border: 1px solid var(--border);
-                border-radius: 1.1rem;
-                padding: 1.35rem 1.4rem;
+            .metric-card {
+                background: var(--ph-card);
+                border: 1px solid var(--ph-line);
+                border-radius: 1rem;
+                box-shadow: none;
+                min-height: 7rem;
+                padding: 1.2rem 1.15rem;
+                text-align: left;
             }
-            .metric-tile {
-                background: var(--card);
-                border: 1px solid var(--border);
-                border-radius: 1.15rem;
-                min-height: 8.75rem;
-                padding: 1.3rem 1.4rem;
-            }
-            .metric-label {
-                color: var(--muted);
+            .metric-card-label {
+                color: var(--ph-muted);
                 font-size: 0.78rem;
-                font-weight: 700;
-                letter-spacing: 0.10em;
+                font-weight: 800;
+                letter-spacing: 0.09em;
+                margin-bottom: 0.7rem;
                 text-transform: uppercase;
             }
-            .metric-value {
-                color: var(--text);
-                font-size: clamp(1.7rem, 3vw, 2.4rem);
-                font-weight: 620;
-                letter-spacing: -0.045em;
-                margin-top: 1rem;
-            }
-            .metric-note {
-                color: var(--muted);
-                font-size: 0.88rem;
-                line-height: 1.55;
-                margin-top: 0.8rem;
-            }
-            .accent-badge {
-                background: rgba(13, 122, 135, 0.10);
-                border: 1px solid rgba(13, 122, 135, 0.24);
-                border-radius: 999px;
-                color: var(--accent);
-                display: inline-flex;
-                font-size: 0.76rem;
-                font-weight: 700;
-                letter-spacing: 0.08em;
-                padding: 0.34rem 0.65rem;
-                text-transform: uppercase;
-            }
-            .sidebar-brand {
-                border-bottom: 1px solid var(--border);
-                margin-bottom: 1.4rem;
-                padding-bottom: 1.4rem;
-            }
-            .sidebar-brand-title {
-                color: var(--slate);
-                font-size: 1.05rem;
+            .metric-card-value {
+                color: var(--ph-accent-dark);
+                font-size: clamp(1.45rem, 2.4vw, 2rem);
                 font-weight: 720;
-                letter-spacing: -0.02em;
+                letter-spacing: -0.035em;
             }
-            .sidebar-brand-meta {
-                color: var(--muted);
-                font-size: 0.82rem;
-                line-height: 1.55;
-                margin-top: 0.35rem;
+            .metric-card.positive .metric-card-value { color: var(--ph-positive); }
+            .metric-card.negative .metric-card-value { color: var(--ph-negative); }
+            .tracking-note {
+                color: var(--ph-muted);
+                font-size: 1rem;
+                line-height: 1.65;
+                margin: 0.35rem 0 1.3rem;
+            }
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 0.35rem;
+                padding: 0.25rem;
+                background: var(--ph-card);
+                border: 1px solid var(--ph-line);
+                border-radius: 0.95rem;
+            }
+            .stTabs [data-baseweb="tab"] {
+                border-radius: 0.75rem;
+                color: var(--ph-muted);
+                font-weight: 700;
+                padding: 0.65rem 1.05rem;
+            }
+            .stTabs [aria-selected="true"] {
+                background: var(--ph-accent);
+                color: #FFFFFF;
             }
             div[data-testid="stExpander"] {
-                background: #FFFFFF;
-                border: 1px solid var(--border);
+                background: var(--ph-card);
+                border: 1px solid var(--ph-line);
                 border-radius: 1rem;
-                margin-bottom: 1rem;
+                box-shadow: none;
+                margin-bottom: 0.85rem;
             }
-            div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
-                border: 1px solid var(--border);
+            div[data-testid="stFileUploader"],
+            div[data-testid="stDataFrame"],
+            div[data-testid="stDataEditor"] {
+                background: var(--ph-card);
                 border-radius: 1rem;
-                overflow: hidden;
             }
             .stChatMessage {
-                background: #FFFFFF;
-                border: 1px solid var(--border);
+                background: var(--ph-card);
+                border: 1px solid var(--ph-line);
                 border-radius: 1rem;
-                padding: 0.65rem;
+                padding: 0.75rem;
             }
         </style>
         """,
@@ -268,554 +882,340 @@ def apply_design_system() -> None:
     )
 
 
-def section_header(kicker: str, title: str, body: str) -> None:
-    """Render a high-clarity section heading."""
+def render_earnings_styles() -> None:
+    """Compatibility wrapper; global styles are rendered once from main."""
 
-    st.markdown(
-        f"""
-        <div class="section-header">
-            <div class="ndeavour-kicker">{kicker}</div>
-            <h2>{title}</h2>
-            <p>{body}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+def render_timesheet_dashboard() -> None:
+    """Render the earnings dashboard and manual timesheet intake."""
+
+    section_heading(
+        "Earnings dashboard",
+        "Monthly target",
+        "Track hours, rates, and pay against the earnings pace needed to hit your monthly goal.",
     )
 
-
-def metric_tile(label: str, value: str, note: str) -> None:
-    """Render a minimal accessible dashboard metric tile."""
-
-    st.markdown(
-        f"""
-        <div class="metric-tile">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
-            <div class="metric-note">{note}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def format_usd(amount: float) -> str:
-    """Format currency with a leading negative sign."""
-
-    return f"-${abs(amount):,.2f}" if amount < 0 else f"${amount:,.2f}"
-
-
-# -----------------------------------------------------------------------------
-# Data operations
-# -----------------------------------------------------------------------------
-
-
-def normalize_uploaded_table(name: str, raw: bytes, separator: str) -> pd.DataFrame:
-    """Parse uploaded CSV/TSV files into the ledger schema where possible."""
-
-    table = pd.read_csv(io.BytesIO(raw), sep=separator)
-    if table.empty:
-        return pd.DataFrame(columns=LEDGER_COLUMNS)
-
-    normalized_columns = {column.lower().strip().replace("_", " "): column for column in table.columns}
-
-    def pick(*candidates: str) -> str | None:
-        for candidate in candidates:
-            for normalized, original in normalized_columns.items():
-                if candidate in normalized:
-                    return original
-        return None
-
-    date_col = pick("date", "posted", "transaction")
-    vendor_col = pick("vendor", "merchant", "payee", "name")
-    description_col = pick("description", "memo", "details", "note")
-    category_col = pick("category", "class")
-    amount_col = pick("amount", "total", "net")
-    debit_col = pick("debit", "withdrawal", "charge")
-    credit_col = pick("credit", "deposit", "income")
-
-    if amount_col:
-        amounts = table[amount_col].map(parse_amount)
-    elif debit_col or credit_col:
-        debits = table[debit_col].map(parse_amount) if debit_col else 0
-        credits = table[credit_col].map(parse_amount) if credit_col else 0
-        amounts = pd.Series(credits, index=table.index).fillna(0) - pd.Series(debits, index=table.index).fillna(0)
-    else:
-        numeric_columns = table.select_dtypes(include="number").columns.tolist()
-        if not numeric_columns:
-            return pd.DataFrame(columns=LEDGER_COLUMNS)
-        amounts = table[numeric_columns[0]].map(parse_amount)
-
-    dates = pd.to_datetime(table[date_col], errors="coerce").dt.date if date_col else date.today()
-    vendors = table[vendor_col].fillna("Imported vendor") if vendor_col else "Imported vendor"
-    descriptions = table[description_col].fillna("Imported transaction") if description_col else "Imported transaction"
-    categories = table[category_col].fillna("Uncategorized") if category_col else "Uncategorized"
-
-    ledger = pd.DataFrame(
-        {
-            "date": dates,
-            "vendor": vendors,
-            "description": descriptions,
-            "category": categories,
-            "subcategory": "",
-            "amount": amounts,
-            "type": ["Income" if amount >= 0 else "Expense" for amount in amounts],
-            "tax_status": "Needs review",
-            "source": name,
-        },
-        columns=LEDGER_COLUMNS,
-    )
-    valid_categories = set(CATEGORY_OPTIONS[1:])
-    ledger["category"] = ledger["category"].where(ledger["category"].isin(valid_categories), "Uncategorized")
-    return ledger.dropna(subset=["date"])
-
-
-def parse_amount(value: Any) -> float:
-    """Parse common accounting currency values."""
-
-    if pd.isna(value):
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return 0.0
-    negative = text.startswith("(") and text.endswith(")")
-    text = text.replace("(", "").replace(")", "")
-    cleaned = "".join(char for char in text if char.isdigit() or char in ".-")
-    if cleaned in {"", "-", "."}:
-        return 0.0
-    amount = float(cleaned)
-    return -abs(amount) if negative else amount
-
-
-def extract_pdf_summary(raw: bytes) -> tuple[str, int]:
-    """Extract lightweight PDF text metadata without requiring backend OCR."""
-
-    reader = PdfReader(io.BytesIO(raw))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    text = "\n".join(pages).strip()
-    if not text:
-        return "PDF received. No extractable text was found; route this file to OCR or manual review.", len(reader.pages)
-    summary = " ".join(text.split())[:420]
-    return summary, len(reader.pages)
-
-
-def current_month_ledger() -> pd.DataFrame:
-    """Return rows for the current month, falling back to latest ledger month."""
-
-    ledger = st.session_state.ledger.copy()
-    ledger["date"] = pd.to_datetime(ledger["date"], errors="coerce")
-    today = pd.Timestamp(date.today())
-    current = ledger[(ledger["date"].dt.year == today.year) & (ledger["date"].dt.month == today.month)]
-    if not current.empty or ledger["date"].dropna().empty:
-        return current
-
-    latest = ledger["date"].max()
-    return ledger[(ledger["date"].dt.year == latest.year) & (ledger["date"].dt.month == latest.month)]
-
-
-def dashboard_metrics() -> dict[str, float]:
-    """Calculate high-level metrics for the dashboard."""
-
-    month = current_month_ledger()
-    expenses = month.loc[month["type"] == "Expense", "amount"].sum()
-    income = month.loc[month["type"] == "Income", "amount"].sum()
-    monthly_burn = abs(float(expenses))
-    tax_payments = abs(float(month.loc[month["category"] == "Taxes", "amount"].sum()))
-    net_operational_expenses = max(monthly_burn - tax_payments, 0.0)
-    net_profit = float(income) - monthly_burn
-    monthly_tax_target = max(net_profit, 0.0) * st.session_state.target_tax_rate
-    runway = st.session_state.tax_reserve_balance / monthly_tax_target if monthly_tax_target else 0.0
-    return {
-        "monthly_burn": monthly_burn,
-        "net_operational_expenses": net_operational_expenses,
-        "tax_savings_runway": runway,
-        "income": float(income),
-        "net_profit": net_profit,
-        "monthly_tax_target": monthly_tax_target,
-    }
-
-
-def filtered_ledger(period: str, transaction_type: str, categories: list[str], needs_review_only: bool) -> pd.DataFrame:
-    """Apply Ledger Management filters."""
-
-    ledger = st.session_state.ledger.copy()
-    ledger["date"] = pd.to_datetime(ledger["date"], errors="coerce")
-
-    if period == "Current month":
-        today = pd.Timestamp(date.today())
-        ledger = ledger[(ledger["date"].dt.year == today.year) & (ledger["date"].dt.month == today.month)]
-    elif period == "Year to date":
-        today = pd.Timestamp(date.today())
-        ledger = ledger[(ledger["date"].dt.year == today.year) & (ledger["date"] <= today)]
-
-    if transaction_type:
-        ledger = ledger[ledger["type"] == transaction_type]
-    if categories:
-        ledger = ledger[ledger["category"].isin(categories)]
-    if needs_review_only:
-        ledger = ledger[ledger["tax_status"] == "Needs review"]
-
-    ledger["date"] = ledger["date"].dt.date
-    return ledger
-
-
-# -----------------------------------------------------------------------------
-# Sidebar and pages
-# -----------------------------------------------------------------------------
-
-
-def render_sidebar() -> str:
-    """Render structural navigation and return the active section."""
-
-    with st.sidebar:
-        st.markdown(
-            """
-            <div class="sidebar-brand">
-                <div class="sidebar-brand-title">N-Deavour Alignment</div>
-                <div class="sidebar-brand-meta">Private automated finance workspace.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        selected = st.selectbox(
-            "Section",
-            APP_SECTIONS,
-            index=None,
-            placeholder="Select workspace section",
-            help="Switch between the four financial workspace sections.",
-        )
-        if selected:
-            st.session_state.active_section = selected
-
-        st.divider()
-        st.markdown("**Tax model placeholder**")
-        st.session_state.target_tax_rate = st.slider(
-            "Reserve rate",
-            min_value=0,
-            max_value=50,
-            value=int(st.session_state.target_tax_rate * 100),
-            format="%d%%",
-        ) / 100
-        st.session_state.tax_reserve_balance = st.number_input(
-            "Tax reserve balance",
+    settings_col, entry_col = st.columns([1, 1.3], gap="large")
+    with settings_col:
+        st.markdown("#### Target settings")
+        monthly_target = st.number_input(
+            "Monthly target pay (USD)",
             min_value=0.0,
-            value=float(st.session_state.tax_reserve_balance),
-            step=250.0,
+            value=4160.0,
+            step=100.0,
             format="%.2f",
+            help="The monthly earnings goal used to calculate whether you are ahead or behind.",
         )
-
-    return selected
-
-
-def render_app_header() -> None:
-    """Render the persistent product header."""
-
-    left, center, right = st.columns([0.08, 0.84, 0.08])
-    with center:
-        st.markdown(
-            """
-            <div class="ndeavour-kicker">Private financial alignment</div>
-            <h1 class="ndeavour-title">N-Deavour Alignment</h1>
-            <p class="ndeavour-subtitle">
-                A calm command surface for expense classification, tax runway monitoring,
-                document ingestion, and natural-language bookkeeping review.
-            </p>
-            """,
-            unsafe_allow_html=True,
+        base_rate = st.number_input(
+            "Target/base hourly rate (USD)",
+            min_value=0.01,
+            value=26.0,
+            step=1.0,
+            format="%.2f",
+            help="Used to translate the monthly pay target into expected billable hours.",
         )
+        as_of = st.date_input("Dashboard as of", value=date.today())
 
+    with entry_col:
+        st.markdown("#### Add hours worked")
+        with st.form("timesheet_entry_form", clear_on_submit=True):
+            work_date = st.date_input("Date", value=date.today())
+            project = st.text_input("Project or client", placeholder="Client, contract, or workstream")
+            hours = st.number_input("Hours worked", min_value=0.0, value=0.0, step=0.25, format="%.2f")
+            rate = st.number_input("Rate (USD)", min_value=0.0, value=base_rate, step=1.0, format="%.2f")
+            submitted = st.form_submit_button("Add timesheet entry")
 
-def render_dashboard() -> None:
-    """Render the high-level overview page with minimalist metrics."""
+        if submitted:
+            if hours <= 0 or rate <= 0:
+                st.warning("Enter positive hours and rate before adding a timesheet entry.")
+            else:
+                add_timesheet_entry(work_date, project, hours, rate)
+                st.success(f"Added {hours:.2f} hours at ${rate:,.2f}/hr for ${hours * rate:,.2f}.")
 
-    section_header(
-        "Dashboard",
-        "Operational overview",
-        "A sparse, high-signal view of this month's cash activity and tax readiness.",
-    )
-    metrics = dashboard_metrics()
+    dashboard = earnings_dashboard_summary(st.session_state.timesheet, monthly_target, base_rate, as_of)
 
-    left_pad, col_a, col_b, col_c, right_pad = st.columns([0.05, 1, 1, 1, 0.05], gap="large")
-    with col_a:
-        metric_tile(
-            "Total monthly burn",
-            format_usd(metrics["monthly_burn"]),
-            "All current-month outflows, including tax payments and operating costs.",
-        )
-    with col_b:
-        metric_tile(
-            "Net operational expenses",
-            format_usd(metrics["net_operational_expenses"]),
-            "Current-month burn excluding tax payments and owner-level transfers.",
-        )
-    with col_c:
-        metric_tile(
-            "Tax Savings Runway",
-            f"{metrics['tax_savings_runway']:.1f} mo",
-            f"Based on {format_usd(metrics['monthly_tax_target'])} monthly target reserve.",
-        )
-
-    section_header(
-        "Signals",
-        "Model assumptions",
-        "These values are mock-backed until live bookkeeping and tax services are connected.",
-    )
-    signal_cols = st.columns([1, 1, 1], gap="large")
-    with signal_cols[0]:
-        st.markdown('<div class="card"><span class="accent-badge">Income</span><br><br>' + format_usd(metrics["income"]) + '</div>', unsafe_allow_html=True)
-    with signal_cols[1]:
-        st.markdown('<div class="card"><span class="accent-badge">Net profit</span><br><br>' + format_usd(metrics["net_profit"]) + '</div>', unsafe_allow_html=True)
-    with signal_cols[2]:
-        st.markdown('<div class="card"><span class="accent-badge">Reserve balance</span><br><br>' + format_usd(st.session_state.tax_reserve_balance) + '</div>', unsafe_allow_html=True)
-
-
-def render_document_ingestion() -> None:
-    """Render the focused upload workflow for CSV, TSV, and PDF files."""
-
-    section_header(
-        "Document Ingestion",
-        "Upload financial source files",
-        "Drag in normalized exports or statements. Files remain session-scoped in this mock front end.",
+    st.markdown(
+        f"<p class='tracking-note'><strong>Monthly Target:</strong> ${monthly_target:,.2f} USD "
+        f"from {dashboard['month_start'].strftime('%b %d')} to {dashboard['month_end'].strftime('%b %d')}.</p>",
+        unsafe_allow_html=True,
     )
 
-    left, main, right = st.columns([0.12, 0.76, 0.12])
-    with main:
-        uploads = st.file_uploader(
-            "Financial source files",
-            type=["csv", "tsv", "pdf"],
-            accept_multiple_files=True,
-            help="Supported formats: CSV, TSV, and PDF.",
-        )
+    top_cols = st.columns(4)
+    with top_cols[0]:
+        metric_card("Month Actual Earnings", format_usd(dashboard["actual_pay"]))
+    with top_cols[1]:
+        metric_card("Month Target Earnings", format_usd(dashboard["monthly_target"]))
+    with top_cols[2]:
+        metric_card("YTD Actual Earnings", format_usd(dashboard["ytd_pay"]))
+    with top_cols[3]:
+        metric_card("Annual Target Earnings", format_usd(dashboard["annual_target"]))
 
-        with st.expander("**Ingestion standards**", expanded=False):
-            st.markdown(
-                """
-                - CSV/TSV files should include date and amount fields whenever possible.
-                - Recommended columns: `date`, `vendor`, `description`, `category`, and `amount`.
-                - Debits may be represented as negative amounts or split into debit/credit columns.
-                - PDF files are stored as document memory and summarized from extractable text.
-                - Sensitive files should be reviewed before connecting any external processing service.
-                """
+    status_cols = st.columns(4)
+    with status_cols[0]:
+        metric_card("Hours Ahead/Behind", f"{dashboard['hours_gap']:,.2f}", dashboard["hours_gap"])
+    with status_cols[1]:
+        metric_card(
+            "Earnings - Expected by Today",
+            format_usd(dashboard["earnings_to_date_gap"]),
+            dashboard["earnings_to_date_gap"],
+        )
+    with status_cols[2]:
+        metric_card(
+            "Earnings Above/Below Base Rate",
+            format_usd(dashboard["earnings_vs_base_rate"]),
+            dashboard["earnings_vs_base_rate"],
+        )
+    with status_cols[3]:
+        metric_card("Prev Month Hours Ahead/Behind", f"{dashboard['prev_month_hours_gap']:,.2f}", dashboard["prev_month_hours_gap"])
+
+    detail_left, detail_right = st.columns([1.2, 1])
+    with detail_left:
+        st.subheader("Actual vs Target Earnings")
+        chart_data = dashboard["monthly_chart"]
+        month_sort = chart_data["month"].tolist()
+        bars = (
+            alt.Chart(chart_data)
+            .mark_bar(color="#9ec0d4")
+            .encode(
+                x=alt.X("month:N", sort=month_sort, title="Month"),
+                y=alt.Y("actual:Q", title="Earnings (USD)"),
+                tooltip=["month", alt.Tooltip("actual:Q", format="$,.2f")],
             )
+        )
+        target_line = (
+            alt.Chart(chart_data)
+            .mark_line(color="#a9cc9b", strokeWidth=3)
+            .encode(
+                x=alt.X("month:N", sort=month_sort),
+                y="target:Q",
+                tooltip=["month", alt.Tooltip("target:Q", format="$,.2f")],
+            )
+        )
+        st.altair_chart((bars + target_line).properties(height=300), use_container_width=True)
 
-        if uploads:
-            ingest_uploads(uploads)
+    with detail_right:
+        st.subheader("Tracking variables")
+        tracking_rows = pd.DataFrame(
+            [
+                ["Base Rate", format_usd(dashboard["base_rate"])],
+                ["Expected Hours This Month", f"{dashboard['expected_month_hours']:,.2f}"],
+                ["Expected Hours by Today", f"{dashboard['expected_hours_to_date']:,.2f}"],
+                ["Actual Hours", f"{dashboard['actual_hours']:,.2f}"],
+                ["Avg Billable Rate", format_usd(dashboard["avg_rate"])],
+                ["Expected Earnings by Today", format_usd(dashboard["expected_earnings_to_date"])],
+                ["Actual Earnings", format_usd(dashboard["actual_pay"])],
+                ["Earnings Gap", format_usd(dashboard["earnings_to_date_gap"])],
+            ],
+            columns=["Metric", "Value"],
+        )
+        st.dataframe(tracking_rows, use_container_width=True, hide_index=True)
 
-        if st.session_state.uploaded_documents:
-            section_header("Stored", "Uploaded document memory", "Click into each upload for source details and extraction notes.")
-            for document in st.session_state.uploaded_documents:
-                with st.expander(f"**{document['name']}** - {document['kind']}", expanded=False):
-                    st.write(document["summary"])
-                    meta = pd.DataFrame(
-                        [
-                            ["Uploaded", document["uploaded_at"]],
-                            ["Rows added", document["rows_added"]],
-                            ["Source type", document["kind"]],
-                        ],
-                        columns=["Field", "Value"],
-                    )
-                    st.dataframe(meta, use_container_width=True, hide_index=True)
+    section_heading("Freelance timesheet", "Entries", "A focused view of this month's remembered billable work.")
+    summary_cols = st.columns(3)
+    with summary_cols[0]:
+        metric_card("Avg Billable Rate", format_usd(dashboard["avg_rate"]))
+    with summary_cols[1]:
+        metric_card("Total Hours", f"{dashboard['actual_hours']:,.2f}")
+    with summary_cols[2]:
+        metric_card("Total Pay", format_usd(dashboard["actual_pay"]))
 
-
-def ingest_uploads(uploads: list[Any]) -> None:
-    """Process new upload streams and update ledger/document state."""
-
-    for upload in uploads:
-        key = f"{upload.name}:{upload.size}"
-        if key in st.session_state.processed_upload_keys:
-            continue
-
-        raw = upload.getvalue()
-        extension = upload.name.rsplit(".", 1)[-1].lower()
-        rows_added = 0
-        if extension in {"csv", "tsv"}:
-            separator = "\t" if extension == "tsv" else ","
-            parsed = normalize_uploaded_table(upload.name, raw, separator)
-            rows_added = len(parsed)
-            if rows_added:
-                st.session_state.ledger = pd.concat([st.session_state.ledger, parsed], ignore_index=True)
-            summary = f"Parsed {rows_added:,} ledger rows from tabular upload."
-        else:
-            summary, page_count = extract_pdf_summary(raw)
-            summary = f"PDF pages: {page_count}. Extracted summary: {summary}"
-
-        st.session_state.uploaded_documents.append(
-            {
-                "name": upload.name,
-                "kind": extension.upper(),
-                "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "rows_added": rows_added,
-                "summary": summary,
+    entries = dashboard["current_month_entries"]
+    if entries.empty:
+        st.info("Add timesheet entries to see monthly hours and pay here.")
+    else:
+        display_entries = entries.copy()
+        display_entries["date"] = pd.to_datetime(display_entries["date"]).dt.strftime("%Y-%m-%d")
+        display_entries = display_entries.rename(
+            columns={
+                "date": "Date",
+                "project": "Project",
+                "hours": "Hours",
+                "rate": "Rate (USD)",
+                "total_pay": "Total Pay",
             }
         )
-        st.session_state.processed_upload_keys.add(key)
-        st.success(f"Ingested {upload.name}")
-
-
-def render_ledger_management() -> None:
-    """Render interactive ledger auditing controls and expandable tables."""
-
-    section_header(
-        "Ledger Management",
-        "Audit and classify transactions",
-        "Review sensitive financial records with low-density filters and explicit manual categorization controls.",
-    )
-
-    with st.expander("**Filters**", expanded=True):
-        period_col, type_col, category_col, review_col = st.columns([1, 1, 1.4, 1], gap="large")
-        with period_col:
-            period = st.selectbox("Period", ["", "Current month", "Year to date", "All records"], index=0, placeholder="Select period")
-            period = "All records" if period == "" else period
-        with type_col:
-            transaction_type = st.selectbox("Transaction type", TYPE_OPTIONS, index=0, placeholder="Select transaction type")
-        with category_col:
-            categories = st.multiselect("Categories", CATEGORY_OPTIONS[1:], default=[], placeholder="Select categories")
-        with review_col:
-            needs_review_only = st.toggle("Needs review only", value=False)
-
-    visible = filtered_ledger(period, transaction_type, categories, needs_review_only)
-
-    with st.expander("**Ledger table**", expanded=True):
-        edited = st.data_editor(
-            visible,
+        st.dataframe(
+            display_entries.style.format(
+                {"Hours": "{:.2f}", "Rate (USD)": "${:,.2f}", "Total Pay": "${:,.2f}"}
+            ),
             use_container_width=True,
             hide_index=True,
-            num_rows="dynamic",
-            column_config={
-                "category": st.column_config.SelectboxColumn("Category", options=CATEGORY_OPTIONS, required=False),
-                "subcategory": st.column_config.SelectboxColumn(
-                    "Subcategory",
-                    options=sorted({item for options in SUBCATEGORY_OPTIONS.values() for item in options}),
-                    required=False,
-                ),
-                "type": st.column_config.SelectboxColumn("Type", options=TYPE_OPTIONS, required=False),
-                "tax_status": st.column_config.SelectboxColumn("Tax status", options=TAX_STATUS_OPTIONS, required=False),
-                "amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
-            },
-            key="ledger_editor",
         )
-        if st.button("Apply visible table edits"):
-            apply_ledger_edits(edited)
-            st.success("Visible ledger edits applied.")
+        st.download_button(
+            "Download monthly timesheet",
+            entries.to_csv(index=False).encode("utf-8"),
+            file_name=f"timesheet-{as_of.strftime('%Y-%m')}.csv",
+            mime="text/csv",
+        )
+
+    if st.button("Clear timesheet entries"):
+        st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
+        st.session_state.ledger = st.session_state.ledger[st.session_state.ledger["source"] != "Timesheet"]
+        st.rerun()
+
+
+def render_hero() -> None:
+    """Render a quiet Gemini-inspired app introduction."""
+
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-kicker">Phreedom financial agent</div>
+            <h1>Your money, clearly organized.</h1>
+            <p>Ask questions, upload documents, track billable work, and see whether your month is on pace without visual clutter.</p>
+            <div class="hero-palette">
+                <span class="swatch-mist"></span>
+                <span class="swatch-lavender"></span>
+                <span class="swatch-blue"></span>
+                <span class="swatch-green"></span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_profile_controls() -> tuple[str, float, str]:
+    """Render compact profile controls and return selected settings."""
+
+    with st.expander("Profile settings", expanded=False):
+        settings_col, tax_col, notes_col = st.columns([1.1, 0.9, 1.4], gap="large")
+        with settings_col:
+            business_type = st.text_input(
+                "Business or income type",
+                placeholder="Freelancer, LLC, sole proprietor...",
+            )
+        with tax_col:
+            tax_rate = st.slider("Tax savings reserve rate", 0, 50, 30, format="%d%%") / 100
+        with notes_col:
+            tax_notes = st.text_area(
+                "Tax notes",
+                placeholder="State, filing status, estimated payments, payroll, deductions...",
+            )
+
+        if st.button("Clear all remembered financial data"):
+            st.session_state.ledger = pd.DataFrame(columns=LEDGER_COLUMNS)
+            st.session_state.document_summaries = []
+            st.session_state.processed_files = set()
+            st.session_state.messages = st.session_state.messages[:1]
+            st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
             st.rerun()
 
-    with st.expander("**Manual audit controls**", expanded=False):
-        candidate_labels = [""] + [
-            f"{idx} | {row['date']} | {row['vendor']} | {format_usd(float(row['amount']))}"
-            for idx, row in visible.iterrows()
-        ]
-        selected_label = st.selectbox("Transaction", candidate_labels, index=0, placeholder="Select transaction")
-        selected_index = int(selected_label.split(" | ", 1)[0]) if selected_label else None
-
-        audit_cols = st.columns([1, 1, 1], gap="large")
-        with audit_cols[0]:
-            new_category = st.selectbox("Category", CATEGORY_OPTIONS, index=0, key="manual_category", placeholder="Select category")
-        subcategory_options = SUBCATEGORY_OPTIONS.get(new_category, [""])
-        with audit_cols[1]:
-            new_subcategory = st.selectbox("Subcategory", subcategory_options, index=0, key="manual_subcategory", placeholder="Select subcategory")
-        with audit_cols[2]:
-            new_tax_status = st.selectbox("Tax status", TAX_STATUS_OPTIONS, index=0, key="manual_tax_status", placeholder="Select tax status")
-
-        if st.button("Apply manual classification"):
-            if selected_index is None:
-                st.warning("Select a transaction before applying manual classification.")
-            else:
-                if new_category:
-                    st.session_state.ledger.loc[selected_index, "category"] = new_category
-                if new_subcategory:
-                    st.session_state.ledger.loc[selected_index, "subcategory"] = new_subcategory
-                if new_tax_status:
-                    st.session_state.ledger.loc[selected_index, "tax_status"] = new_tax_status
-                st.success("Manual classification applied.")
-                st.rerun()
+    return business_type, tax_rate, tax_notes
 
 
-def apply_ledger_edits(edited: pd.DataFrame) -> None:
-    """Apply edits from the visible data editor back to session ledger."""
+def render_upload_section() -> None:
+    """Render the document intake area with clear hierarchy."""
 
-    for index, row in edited.iterrows():
-        if index in st.session_state.ledger.index:
-            for column in LEDGER_COLUMNS:
-                if column in edited.columns:
-                    st.session_state.ledger.loc[index, column] = row[column]
-
-
-def render_agent_workspace() -> None:
-    """Render a full-width minimal chat interface for financial prompting."""
-
-    section_header(
-        "Agent Workspace",
-        "Prompt against your financial model",
-        "A quiet natural-language workspace for reviewing burn, runway, categorization gaps, and tax posture.",
+    section_heading(
+        "Document intake",
+        "Upload",
+        "Add bank exports, receipts, invoices, or tax PDFs. Each uploaded document becomes its own remembered section below.",
     )
+    render_uploads()
 
-    for message in st.session_state.chat_messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
-    prompt = st.chat_input("Ask about runway, deductions, burn, or ledger cleanup")
-    if not prompt:
+def render_financial_profile(summary: dict[str, Any]) -> None:
+    """Render the ledger and expense categories in a clean section."""
+
+    section_heading(
+        "Financial profile",
+        "Ledger",
+        "Transactions remembered from uploads and timesheet entries.",
+    )
+    if st.session_state.ledger.empty:
+        st.info("Upload a CSV/PDF or add timesheet earnings to start building your profile.")
         return
 
-    st.session_state.chat_messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    st.dataframe(st.session_state.ledger, use_container_width=True, hide_index=True)
+    if not summary["top_expenses"].empty:
+        section_heading("Expense categories", "Breakdown", "Your largest remembered expense categories.")
+        st.bar_chart(summary["top_expenses"].set_index("category"))
 
-    response = generate_mock_agent_response(prompt)
-    st.session_state.chat_messages.append({"role": "assistant", "content": response})
-    with st.chat_message("assistant"):
-        st.markdown(response)
-
-
-def generate_mock_agent_response(prompt: str) -> str:
-    """Generate a deterministic mock response from local financial state."""
-
-    metrics = dashboard_metrics()
-    needs_review = int((st.session_state.ledger["tax_status"] == "Needs review").sum())
-    prompt_lower = prompt.lower()
-
-    if "tax" in prompt_lower or "runway" in prompt_lower:
-        return (
-            f"Tax reserve balance is {format_usd(st.session_state.tax_reserve_balance)}. "
-            f"At the current modeled monthly reserve need of {format_usd(metrics['monthly_tax_target'])}, "
-            f"runway is approximately {metrics['tax_savings_runway']:.1f} months."
-        )
-    if "burn" in prompt_lower or "expense" in prompt_lower:
-        return (
-            f"Current monthly burn is {format_usd(metrics['monthly_burn'])}. "
-            f"Net operational expenses are {format_usd(metrics['net_operational_expenses'])} after excluding tax payments."
-        )
-    if "review" in prompt_lower or "categor" in prompt_lower:
-        return f"There are {needs_review} transactions marked as needing review. Start in Ledger Management, then filter by Needs review only."
-    return (
-        "I can help inspect monthly burn, tax runway, deductible classifications, and ledger cleanup. "
-        f"Current modeled net profit is {format_usd(metrics['net_profit'])}."
+    csv = st.session_state.ledger.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download remembered ledger",
+        csv,
+        file_name=f"financial-agent-ledger-{datetime.now().date()}.csv",
+        mime="text/csv",
     )
 
 
-# -----------------------------------------------------------------------------
-# App entrypoint
-# -----------------------------------------------------------------------------
+def render_document_memory(summary: dict[str, Any], tax_rate: float) -> None:
+    """Render stored documents as separate clickable sections."""
+
+    section_heading(
+        "Stored documents",
+        "Memory",
+        "Each upload is saved as a separate clickable section for quick review.",
+    )
+    documents = remembered_documents()
+    if not documents:
+        st.info("Upload documents to create separate memory sections here.")
+    else:
+        for index, document in enumerate(documents, start=1):
+            source = document.get("source") or f"Document {index}"
+            rows = document.get("transactions")
+            uploaded_at = document.get("uploaded_at") or "This session"
+            row_text = "No transaction rows" if rows in (None, 0) else f"{rows:,} transaction rows"
+            with st.expander(f"{source} - {row_text}", expanded=index == 1):
+                st.caption(f"Remembered {uploaded_at}")
+                st.write(document.get("summary", "No summary available."))
+
+    section_heading(
+        "Tax savings recommendation",
+        "Planning",
+        "A simple reserve estimate based on the currently remembered financial profile.",
+    )
+    if summary["profit"] > 0:
+        metric_card("Suggested reserve", format_usd(summary["tax_reserve"]))
+        st.markdown(
+            f"<p class='tracking-note'>Set aside {format_usd(summary['tax_reserve'])} from current net profit "
+            f"using your selected {tax_rate:.0%} reserve rate.</p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info(
+            "No positive taxable profit is currently loaded. Keep tracking income and expenses, "
+            "and reassess estimated taxes once the profile shows profit."
+        )
+    st.caption("Planning guidance only; not formal tax, legal, or accounting advice.")
 
 
 def main() -> None:
     """Run the Streamlit application."""
 
-    st.set_page_config(page_title="N-Deavour Alignment", page_icon=":bar_chart:", layout="wide")
+    st.set_page_config(page_title="Personal Financial Agent", page_icon=":moneybag:", layout="wide")
     init_state()
-    apply_design_system()
-    active_section = render_sidebar()
-    render_app_header()
+    render_global_styles()
+    render_hero()
 
-    if active_section == "Dashboard":
-        render_dashboard()
-    elif active_section == "Document Ingestion":
-        render_document_ingestion()
-    elif active_section == "Ledger Management":
-        render_ledger_management()
-    elif active_section == "Agent Workspace":
-        render_agent_workspace()
+    business_type, tax_rate, tax_notes = render_profile_controls()
+    render_upload_section()
+
+    summary = financial_summary(st.session_state.ledger, tax_rate)
+    render_metrics(summary)
+
+    earnings_tab, data_tab, memory_tab, chat_tab = st.tabs(
+        ["Dashboard", "Ledger", "Documents", "Chat"]
+    )
+
+    with earnings_tab:
+        render_timesheet_dashboard()
+
+    with data_tab:
+        render_financial_profile(summary)
+
+    with memory_tab:
+        render_document_memory(summary, tax_rate)
+
+    with chat_tab:
+        section_heading(
+            "Ask Phreedom",
+            "Chat",
+            "Use the remembered ledger, documents, and timesheet to ask direct financial questions.",
+        )
+        render_chat(tax_rate, business_type, tax_notes)
 
 
 if __name__ == "__main__":
