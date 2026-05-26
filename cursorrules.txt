@@ -1,0 +1,6 @@
+# N-Deavour UI & Operational Design Constraints
+- Framework: Python Streamlit. Keep UI code highly modularized.
+- Theme: Nordic/Swiss minimalism. Maximize negative space and horizontal whitespace padding using st.columns.
+- Brand Palette: Cloud Light background (#F8FAFC), Slate text hierarchy (#1E293B), and Deep Teal accent tags (#0D7A87) for primary calls to action.
+- Layout: Abstract dense transaction histories and manual metadata entry tables inside collapsible st.expander menus or multi-select dropdowns.
+- Autonomy Rule: Use background terminal commands to test the code. If the script throws an error, trace the bug log and patch the file autonomously without pausing the run for human permission.
