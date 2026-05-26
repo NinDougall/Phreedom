@@ -26,6 +26,7 @@ from pypdf import PdfReader
 
 LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
+APP_PAGES = ["Dashboard", "Timesheet", "Chat"]
 CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
 DATE_RE = re.compile(
     r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b)"
@@ -63,6 +64,8 @@ def init_state() -> None:
         ]
     if "timesheet" not in st.session_state:
         st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
+    if "active_page" not in st.session_state:
+        st.session_state.active_page = "Dashboard"
 
 
 def infer_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
@@ -991,6 +994,23 @@ def render_global_styles() -> None:
                 white-space: nowrap;
                 width: 1px;
             }
+            .top-menu-shell {
+                align-items: center;
+                display: flex;
+                gap: 0.9rem;
+                margin: 0 0 1.2rem;
+            }
+            .top-menu-current {
+                color: var(--brand-muted);
+                font-size: 0.88rem;
+                font-weight: 750;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+            div[data-testid="stPopover"] button {
+                min-height: 2.75rem;
+                min-width: 2.75rem;
+            }
             @media (max-width: 640px) {
                 .block-container {
                     padding: 1.25rem 1rem 3rem;
@@ -1377,6 +1397,53 @@ def render_document_memory(summary: dict[str, Any], tax_rate: float) -> None:
     st.caption("Planning guidance only; not formal tax, legal, or accounting advice.")
 
 
+def render_top_left_menu() -> str:
+    """Render a top-left opening menu and return the active page."""
+
+    menu_col, current_col, spacer_col = st.columns([0.16, 0.36, 0.48], vertical_alignment="center")
+    with menu_col:
+        with st.popover("Menu", help="Open the main navigation menu"):
+            st.markdown("**Navigate**")
+            for page in APP_PAGES:
+                is_current = page == st.session_state.active_page
+                label = f"{page} (current)" if is_current else page
+                if st.button(label, key=f"menu_{page.lower()}", use_container_width=True, disabled=is_current):
+                    st.session_state.active_page = page
+                    render_accessible_status(f"Navigated to {page}.")
+                    st.rerun()
+    with current_col:
+        st.markdown(
+            f'<div class="top-menu-current" aria-live="polite">Current: {st.session_state.active_page}</div>',
+            unsafe_allow_html=True,
+        )
+
+    return st.session_state.active_page
+
+
+def render_dashboard_home(summary: dict[str, Any], tax_rate: float) -> None:
+    """Render the home dashboard page and related financial overview tools."""
+
+    render_upload_section()
+    render_metrics(summary)
+
+    with st.expander("Financial profile and ledger", expanded=False):
+        render_financial_profile(summary)
+
+    with st.expander("Documents and tax savings", expanded=False):
+        render_document_memory(summary, tax_rate)
+
+
+def render_chat_page(tax_rate: float, business_type: str, tax_notes: str) -> None:
+    """Render the dedicated Phreedom bot interaction page."""
+
+    section_heading(
+        "Chat with Phreedom",
+        "Bot workspace",
+        "Ask Phreedom direct questions about your uploaded documents, ledger, tax reserve, income, expenses, or cash flow.",
+    )
+    render_chat(tax_rate, business_type, tax_notes)
+
+
 def main() -> None:
     """Run the Streamlit application."""
 
@@ -1384,34 +1451,18 @@ def main() -> None:
     init_state()
     render_global_styles()
     render_accessibility_landmarks()
+    active_page = render_top_left_menu()
     render_hero()
 
     business_type, tax_rate, tax_notes = render_profile_controls()
-    render_upload_section()
-
     summary = financial_summary(st.session_state.ledger, tax_rate)
-    render_metrics(summary)
 
-    earnings_tab, data_tab, memory_tab, chat_tab = st.tabs(
-        ["Dashboard", "Ledger", "Documents", "Chat"]
-    )
-
-    with earnings_tab:
+    if active_page == "Dashboard":
+        render_dashboard_home(summary, tax_rate)
+    elif active_page == "Timesheet":
         render_timesheet_dashboard()
-
-    with data_tab:
-        render_financial_profile(summary)
-
-    with memory_tab:
-        render_document_memory(summary, tax_rate)
-
-    with chat_tab:
-        section_heading(
-            "Ask N-Deavourservices",
-            "Chat",
-            "Use the remembered ledger, documents, and timesheet to ask direct financial questions.",
-        )
-        render_chat(tax_rate, business_type, tax_notes)
+    elif active_page == "Chat":
+        render_chat_page(tax_rate, business_type, tax_notes)
 
     close_accessibility_landmarks()
 
