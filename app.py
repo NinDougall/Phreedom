@@ -404,10 +404,12 @@ def fallback_response(prompt: str, context: str, tax_rate: float) -> str:
 def get_openai_key() -> str | None:
     """Read an OpenAI key from Streamlit secrets or environment variables."""
 
+    key = None
     try:
-        return st.secrets.get("OPENAI_API_KEY")  # type: ignore[union-attr]
+        key = st.secrets.get("OPENAI_API_KEY")  # type: ignore[union-attr]
     except Exception:
-        return os.getenv("OPENAI_API_KEY")
+        pass
+    return key or os.getenv("OPENAI_API_KEY")
 
 
 def generate_agent_response(prompt: str, tax_rate: float, business_type: str, tax_notes: str) -> str:
@@ -422,6 +424,10 @@ def generate_agent_response(prompt: str, tax_rate: float, business_type: str, ta
         from openai import OpenAI
 
         client = OpenAI(api_key=api_key)
+        conversation = st.session_state.messages[-10:]
+        if not conversation or conversation[-1].get("role") != "user" or conversation[-1].get("content") != prompt:
+            conversation = [*conversation, {"role": "user", "content": prompt}]
+
         response = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             messages=[
@@ -435,8 +441,7 @@ def generate_agent_response(prompt: str, tax_rate: float, business_type: str, ta
                     ),
                 },
                 {"role": "system", "content": f"Financial memory:\n{context}"},
-                *st.session_state.messages[-10:],
-                {"role": "user", "content": prompt},
+                *conversation,
             ],
             temperature=0.2,
         )

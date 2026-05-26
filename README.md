@@ -16,7 +16,7 @@ financial agent. It can:
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+python3 -m streamlit run app.py
 ```
 
 The app works without an API key by using deterministic local analysis. To add
@@ -25,7 +25,7 @@ environment:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-streamlit run app.py
+python3 -m streamlit run app.py
 ```
 
 You can optionally set `OPENAI_MODEL`; otherwise the app uses `gpt-4o-mini`.
