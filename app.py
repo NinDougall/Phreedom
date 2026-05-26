@@ -44,6 +44,82 @@ DATE_RE = re.compile(
     r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b)"
 )
 
+# Credit card statement detection signals
+_CC_DATE_HINTS = ("transaction date", "trans date", "post date", "posted date",
+                  "posting date", "transaction_date", "posted_date")
+_CC_DESC_HINTS = ("description", "merchant", "payee", "trans description",
+                  "transaction description")
+_CC_PAYMENT_KW = ("payment", "autopay", "auto pay", "epay", "online pmt",
+                  "online payment", "bill pay", "thank you", "min payment",
+                  "minimum payment", "mobile payment", "check payment")
+
+# Keyword → spending category map (longest / most specific match wins via order)
+CC_SPEND_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "Restaurants & Dining": (
+        "restaurant", "cafe", "coffee", "pizza", "burger", "sushi", "diner",
+        "mcdonald", "starbucks", "dunkin", "chipotle", "grubhub", "doordash",
+        "ubereats", "seamless", "panera", "subway", "kfc", "taco bell", "wendy",
+        "chick-fil", "noodles", "panda express", "domino", "five guys", "shake shack",
+        "cheesecake factory", "olive garden", "applebee", "denny", "ihop", "waffle house",
+    ),
+    "Groceries": (
+        "grocery", "supermarket", "trader joe", "whole foods", "kroger", "safeway",
+        "publix", "costco", "aldi", "shoprite", "stop & shop", "wegmans", "food mart",
+        "market basket", "sprouts", "harris teeter", "h-e-b", "meijer", "smart & final",
+    ),
+    "Gas & Auto": (
+        "shell", "exxon", "chevron", "bp oil", "mobil", "sunoco", "marathon",
+        "casey's", "speedway", "circle k", "wawa", "gas station", "fuel",
+        "parking", "car wash", "jiffy lube", "autozone", "napa auto", "o'reilly auto",
+        "advance auto", "pep boys", "midas", "firestone", "valvoline",
+    ),
+    "Travel & Transport": (
+        "delta", "united airline", "american airline", "southwest", "jetblue",
+        "spirit air", "frontier air", "alaska air", "lufthansa", "british airways",
+        "hotel", "marriott", "hilton", "hyatt", "airbnb", "vrbo", "expedia",
+        "booking.com", "priceline", "kayak", "uber", "lyft", "taxi", "transit",
+        "amtrak", "enterprise rent", "hertz", "avis", "budget car",
+    ),
+    "Shopping": (
+        "amazon", "ebay", "etsy", "target", "walmart", "macy", "nordstrom",
+        "gap store", "old navy", "zara", "h&m", "best buy", "apple store",
+        "nike", "adidas", "tj maxx", "marshalls", "ross store", "home depot",
+        "lowe's", "ikea", "wayfair", "bed bath", "container store", "dollar tree",
+    ),
+    "Entertainment": (
+        "netflix", "hulu", "spotify", "apple music", "disney+", "hbo max",
+        "paramount+", "peacock", "cinema", "amc theater", "regal cinema",
+        "ticketmaster", "stubhub", "concert", "arcade", "bowling", "playstation",
+        "xbox", "steam games", "twitch", "youtube premium",
+    ),
+    "Health & Medical": (
+        "pharmacy", "cvs", "walgreens", "rite aid", "hospital", "urgent care",
+        "doctor", "dental", "dentist", "orthodontist", "optometrist", "vision",
+        "gym", "planet fitness", "equinox", "24 hour fitness", "la fitness",
+        "anytime fitness", "orange theory", "crossfit", "medical",
+    ),
+    "Utilities & Bills": (
+        "electric", "water bill", "sewer", "internet", "comcast", "spectrum",
+        "xfinity", "at&t bill", "verizon bill", "t-mobile", "sprint",
+        "insurance", "geico", "progressive", "allstate", "state farm",
+    ),
+    "Software & Subscriptions": (
+        "adobe", "microsoft", "google", "dropbox", "zoom", "slack", "github",
+        "aws", "digitalocean", "openai", "figma", "notion", "linear",
+        "1password", "cloudflare", "heroku", "vercel", "render", "twilio",
+        "sendgrid", "mailchimp", "hubspot", "salesforce",
+    ),
+    "Office & Business": (
+        "office depot", "staples", "fedex", "ups store", "usps", "postage",
+        "shipping", "printing", "business supply",
+    ),
+    "Bank & Card Fees": (
+        "annual fee", "late fee", "foreign transaction", "atm fee",
+        "service charge", "wire fee", "overdraft", "returned payment",
+        "interest charge", "cash advance fee",
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -159,6 +235,106 @@ def classify_kind(amount: float, explicit_value: Any = None) -> str:
     return "income" if amount > 0 else "expense"
 
 
+def is_cc_payment(description: str) -> bool:
+    """True if the description looks like a payment to the credit card (not a purchase)."""
+    dl = description.lower()
+    return any(kw in dl for kw in _CC_PAYMENT_KW)
+
+
+def auto_categorize(description: str) -> str:
+    """Map a transaction description to a spending category using keyword matching.
+
+    Uses word-boundary matching so that "macy" does not match inside "pharmacy",
+    etc.  A keyword matches if it appears as a complete token (preceded and
+    followed by a non-alpha character or string boundary).
+    """
+    dl = description.lower()
+    for category, keywords in CC_SPEND_CATEGORIES.items():
+        for kw in keywords:
+            # Use negative look-behind and look-ahead for alpha chars
+            pat = r"(?<![a-z])" + re.escape(kw) + r"(?![a-z])"
+            if re.search(pat, dl):
+                return category
+    return "Uncategorized"
+
+
+
+
+def detect_credit_card_csv(df: pd.DataFrame, columns: list[str]) -> bool:
+    """Return True if this CSV looks like a credit card statement.
+
+    Two tiers of evidence:
+    Tier 1 (explicit CC signals) — any one is enough together with a description column.
+    Tier 2 (implicit / generic) — plain date + description + strongly positive amounts.
+    """
+    normalized = {c.lower().strip().replace("_", " "): c for c in columns}
+
+    has_cc_date  = any(any(h in n for h in _CC_DATE_HINTS) for n in normalized)
+    has_plain_date = "date" in normalized
+    has_desc     = any(any(h in n for h in _CC_DESC_HINTS) for n in normalized)
+    has_debit    = any("debit" in n and "credit" not in n for n in normalized)
+    has_card     = any("card" in n for n in normalized)
+
+    # Tier 1a: explicit CC-style date header + description → CC
+    if has_cc_date and has_desc:
+        return True
+
+    # Tier 1b: debit column → CC (CapOne / Citi style)
+    if has_debit and has_desc:
+        return True
+
+    # Tier 1c: card-number column → CC
+    if has_card and has_desc:
+        return True
+
+    # Tier 1d: "Type" column with purchase values → CC
+    type_col = next((orig for norm, orig in normalized.items() if norm == "type"), None)
+    if type_col and has_desc and not df.empty:
+        type_vals = df[type_col].dropna().astype(str).str.lower().unique()
+        cc_types = {"sale", "purchase", "debit", "debit purchase", "pos"}
+        if any(tv in cc_types for tv in type_vals):
+            return True
+
+    # Tier 1e: issuer-style Category values → CC
+    cat_col = next((orig for norm, orig in normalized.items() if norm == "category"), None)
+    if cat_col and not df.empty:
+        cc_cats = {"food & drink", "shopping", "travel", "entertainment",
+                   "gas", "health & wellness", "merchandise", "restaurants"}
+        sample_cats = df[cat_col].dropna().astype(str).str.lower().unique()
+        if any(sc in cc_cats for sc in sample_cats):
+            return True
+
+    # Tier 2: plain date + description + ≥60% positive amounts, no payroll signals
+    # (handles AmEx, BofA, and other issuers that use plain "Date" headers)
+    _PAYROLL_KW = ("salary", "payroll", "direct deposit", "transfer from",
+                   "ach credit", "wire from", "wire transfer", "deposit from",
+                   "refund from", "reimbursement", "interest earned")
+    if has_plain_date and has_desc and not df.empty:
+        amount_col = next(
+            (orig for norm, orig in normalized.items()
+             if "amount" in norm and "total" not in norm and "hours" not in norm),
+            None,
+        )
+        desc_col_name = next(
+            (orig for norm, orig in normalized.items()
+             if any(h in norm for h in _CC_DESC_HINTS)),
+            None,
+        )
+        if amount_col:
+            vals = pd.to_numeric(df[amount_col], errors="coerce").dropna()
+            pct_pos = (vals > 0).mean() if len(vals) >= 2 else 0
+            has_payroll = False
+            if desc_col_name is not None:
+                descs_lower = df[desc_col_name].dropna().astype(str).str.lower()
+                has_payroll = descs_lower.apply(
+                    lambda d: any(kw in d for kw in _PAYROLL_KW)
+                ).any()
+            if pct_pos >= 0.60 and not has_payroll:
+                return True
+
+    return False
+
+
 def normalize_csv(file_name: str, data: bytes) -> ParsedDocument:
     try:
         df = pd.read_csv(io.BytesIO(data))
@@ -166,47 +342,112 @@ def normalize_csv(file_name: str, data: bytes) -> ParsedDocument:
         return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), f"CSV parse error: {exc}")
     if df.empty:
         return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), "CSV was empty.")
+
     cols = list(df.columns)
-    date_col = infer_column(cols, ("date", "posted", "transaction date", "trans date", "value date"))
-    desc_col = infer_column(cols, ("description", "memo", "details", "narrative", "payee", "reference"))
+    is_cc = detect_credit_card_csv(df, cols)
+
+    # Column inference — CC statements use different header names
+    date_col = infer_column(
+        cols,
+        ("transaction date", "trans date", "post date", "posted date", "date",
+         "value date", "posting date"),
+    )
+    desc_col = infer_column(
+        cols,
+        ("description", "merchant", "payee", "memo", "details", "narrative",
+         "transaction description", "reference"),
+    )
     amount_col = infer_column(cols, ("amount", "net amount", "total", "value"))
-    debit_col = infer_column(cols, ("debit", "withdrawal", "charge", "payment"))
-    credit_col = infer_column(cols, ("credit", "deposit", "income"))
-    kind_col = infer_column(cols, ("type", "transaction type", "kind"))
+    debit_col  = infer_column(cols, ("debit", "withdrawal", "charge"))
+    credit_col = infer_column(cols, ("credit", "deposit"))
+    kind_col   = infer_column(cols, ("type", "transaction type", "kind"))
+    # CC statements often ship with their own category column — keep it if present
     category_col = infer_column(cols, ("category", "class", "classification"))
+
+    # ── Amount extraction ────────────────────────────────────────────────
     if amount_col:
-        amounts = df[amount_col].map(coerce_money)
+        raw_amounts = df[amount_col].map(coerce_money)
     elif debit_col or credit_col:
-        debits = df[debit_col].map(coerce_money) if debit_col else pd.Series(0.0, index=df.index)
+        debits  = df[debit_col].map(coerce_money)  if debit_col  else pd.Series(0.0, index=df.index)
         credits = df[credit_col].map(coerce_money) if credit_col else pd.Series(0.0, index=df.index)
-        amounts = credits - debits
+        raw_amounts = credits - debits
     else:
         num_cols = df.select_dtypes(include="number").columns.tolist()
         if not num_cols:
             return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), "No numeric column found.")
-        amounts = df[num_cols[0]].map(coerce_money)
-    dates = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
-    descriptions = df[desc_col].fillna("Imported transaction") if desc_col else "Imported transaction"
-    categories = df[category_col].fillna("Uncategorized") if category_col else "Uncategorized"
-    kinds = [
-        classify_kind(a, df[kind_col].iloc[i] if kind_col else None)
-        for i, a in enumerate(amounts)
-    ]
+        raw_amounts = df[num_cols[0]].map(coerce_money)
+
+    # ── CC sign normalisation ────────────────────────────────────────────
+    # Credit card statements show purchases as POSITIVE amounts.
+    # We flip them to NEGATIVE so they register as expenses in the ledger.
+    # Payments back to the card (negative on CC statement) become positive → income.
+    descriptions_raw = (
+        df[desc_col].fillna("Transaction").astype(str)
+        if desc_col else pd.Series(["Transaction"] * len(df), index=df.index)
+    )
+
+    if is_cc:
+        amounts = raw_amounts.copy()
+        kinds = []
+        for i, (amt, desc) in enumerate(zip(amounts, descriptions_raw)):
+            if is_cc_payment(desc):
+                # Payment to card — treat as income (reduces outstanding balance)
+                kinds.append("income")
+                if amt < 0:
+                    amounts.iloc[i] = abs(amt)   # ensure positive for income
+            else:
+                # Purchase — always an expense regardless of sign
+                kinds.append("expense")
+                if amt > 0:
+                    amounts.iloc[i] = -amt        # flip positive purchase to negative
+        amounts = pd.Series(amounts, index=df.index)
+    else:
+        amounts = raw_amounts
+        kinds = [
+            classify_kind(a, df[kind_col].iloc[i] if kind_col else None)
+            for i, a in enumerate(amounts)
+        ]
+
+    # ── Date and description ─────────────────────────────────────────────
+    dates        = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+    descriptions = descriptions_raw
+    # ── Category ─────────────────────────────────────────────────────────
+    # For CC statements: auto-categorise from description keywords,
+    # but respect any category column already present.
+    if is_cc:
+        if category_col:
+            # Use issuer's category when available, but normalise blanks
+            cats = df[category_col].astype(str).where(
+                df[category_col].notna() & (df[category_col].astype(str).str.strip() != ""),
+                None,
+            )
+            categories = cats.where(
+                cats.notna(),
+                descriptions.map(auto_categorize),
+            )
+        else:
+            categories = descriptions.map(auto_categorize)
+    else:
+        categories = df[category_col].fillna("Uncategorized") if category_col else "Uncategorized"
+
+    # ── Build ledger ─────────────────────────────────────────────────────
     ledger = pd.DataFrame(
         {
-            "date": dates.dt.date if hasattr(dates, "dt") else dates,
+            "date":        dates.dt.date if hasattr(dates, "dt") else dates,
             "description": descriptions,
-            "amount": amounts,
-            "kind": kinds,
-            "category": categories,
-            "source": file_name,
+            "amount":      amounts,
+            "kind":        kinds,
+            "category":    categories,
+            "source":      file_name,
         },
         columns=LEDGER_COLUMNS,
     ).dropna(subset=["date"])
-    income = float(ledger.loc[ledger["kind"] == "income", "amount"].sum())
+
+    income   = float(ledger.loc[ledger["kind"] == "income",  "amount"].sum())
     expenses = float(ledger.loc[ledger["kind"] == "expense", "amount"].abs().sum())
-    summary = (
-        f"Imported {len(ledger)} CSV transactions from {file_name}: "
+    cc_tag   = " (credit card statement)" if is_cc else ""
+    summary  = (
+        f"Imported {len(ledger)} transactions from {file_name}{cc_tag}: "
         f"${income:,.2f} income and ${expenses:,.2f} expenses."
     )
     return ParsedDocument(file_name, ledger, summary)
@@ -1161,6 +1402,99 @@ def render_permanent_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
+
+def spending_summary(ledger: pd.DataFrame) -> pd.DataFrame:
+    """Return expense totals grouped by category, descending by amount."""
+    if ledger.empty:
+        return pd.DataFrame(columns=["category", "amount", "pct", "tx_count"])
+    expenses = ledger.loc[ledger["kind"] == "expense"].copy()
+    if expenses.empty:
+        return pd.DataFrame(columns=["category", "amount", "pct", "tx_count"])
+    grouped = (
+        expenses
+        .assign(amount=lambda f: f["amount"].abs())
+        .groupby("category", dropna=False)
+        .agg(amount=("amount", "sum"), tx_count=("amount", "count"))
+        .sort_values("amount", ascending=False)
+        .reset_index()
+    )
+    total = grouped["amount"].sum()
+    grouped["pct"] = (grouped["amount"] / total * 100).round(1) if total else 0.0
+    return grouped
+
+
+def render_spending_dashboard(ledger: pd.DataFrame) -> None:
+    """Spending category breakdown — only shown when expense data exists."""
+    df = spending_summary(ledger)
+    if df.empty:
+        return
+
+    total_spend = float(df["amount"].sum())
+    top = df.head(8)
+
+    _section(
+        "Spending breakdown",
+        "Categories",
+        f"Auto-categorised from transaction descriptions. "
+        f"Total: {format_usd(total_spend)} across {int(df['tx_count'].sum())} expense rows.",
+    )
+
+    # ── Top-4 KPI tiles ───────────────────────────────────────────────────
+    top4 = top.head(4)
+    _, *kpi_cols, _ = st.columns([0.04] + [1] * len(top4) + [0.04], gap="large")
+    for col, (_, row) in zip(kpi_cols, top4.iterrows()):
+        with col:
+            _kpi(row["category"], format_usd(row["amount"]))
+    _divider_space(0.5)
+
+    # ── Chart + table side by side ────────────────────────────────────────
+    _, chart_col, table_col, _ = st.columns([0.04, 0.5, 0.42, 0.04], gap="large")
+
+    with chart_col:
+        bar = (
+            alt.Chart(top)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+            .encode(
+                x=alt.X(
+                    "amount:Q",
+                    title="USD spent",
+                    axis=alt.Axis(labelColor="#C4B8DF", format="$,.0f"),
+                ),
+                y=alt.Y(
+                    "category:N",
+                    sort="-x",
+                    title=None,
+                    axis=alt.Axis(labelColor="#C4B8DF"),
+                ),
+                color=alt.Color(
+                    "amount:Q",
+                    scale=alt.Scale(scheme="purples"),
+                    legend=None,
+                ),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("amount:Q",   title="Total",  format="$,.2f"),
+                    alt.Tooltip("tx_count:Q", title="Transactions"),
+                    alt.Tooltip("pct:Q",      title="% of spend", format=".1f"),
+                ],
+            )
+            .properties(height=min(280, len(top) * 38), background="transparent")
+            .configure_view(strokeWidth=0)
+            .configure_axis(grid=False, domain=False)
+        )
+        st.altair_chart(bar, use_container_width=True)
+
+    with table_col:
+        disp = df.copy()
+        disp["amount"] = disp["amount"].map(lambda v: f"${v:,.2f}")
+        disp["pct"]    = disp["pct"].map(lambda v: f"{v:.1f}%")
+        disp = disp.rename(columns={
+            "category": "Category", "amount": "Total",
+            "pct": "% of spend", "tx_count": "Transactions",
+        })
+        st.dataframe(disp, use_container_width=True, hide_index=True)
+
+
 def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
 
     # ── Headline metrics ─────────────────────────────────────────────────
@@ -1176,6 +1510,9 @@ def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
     with c4:
         _kpi("Tax reserve", format_usd(summary["tax_reserve"]))
     _divider_space(0.5)
+
+    # ── Spending category breakdown (shown when expense data exists) ─────
+    render_spending_dashboard(st.session_state.ledger)
 
     # ── Upload & ingestion ───────────────────────────────────────────────
     _section(
