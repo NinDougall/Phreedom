@@ -724,24 +724,31 @@ def metric_card(label: str, value: str, status_value: float | None = None) -> No
 
 
 def render_global_styles() -> None:
-    """Apply a high-contrast, minimal visual system without hiding functionality."""
+    """Apply a dark, high-contrast visual system without hiding functionality."""
 
     st.markdown(
         """
         <style>
             :root {
-                --ph-bg: #F8FAFC;
-                --ph-ink: #0F172A;
-                --ph-muted: #475569;
-                --ph-line: #CBD5E1;
-                --ph-card: #FFFFFF;
-                --ph-accent: #0D7A87;
-                --ph-accent-dark: #0A626D;
-                --ph-positive: #166534;
-                --ph-negative: #991B1B;
+                --ph-bg: #020617;
+                --ph-surface: #0B1220;
+                --ph-card: #0F172A;
+                --ph-card-strong: #111827;
+                --ph-ink: #F8FAFC;
+                --ph-muted: #CBD5E1;
+                --ph-subtle: #94A3B8;
+                --ph-line: #334155;
+                --ph-line-soft: #1E293B;
+                --ph-accent: #5EEAD4;
+                --ph-accent-strong: #22D3EE;
+                --ph-positive: #86EFAC;
+                --ph-negative: #FCA5A5;
             }
             .stApp {
-                background: var(--ph-bg);
+                background:
+                    radial-gradient(circle at 20% 0%, rgba(34, 211, 238, 0.10), transparent 28rem),
+                    radial-gradient(circle at 85% 12%, rgba(94, 234, 212, 0.08), transparent 30rem),
+                    var(--ph-bg);
                 color: var(--ph-ink);
             }
             .block-container {
@@ -755,7 +762,7 @@ def render_global_styles() -> None:
                 letter-spacing: -0.035em;
             }
             .hero {
-                background: var(--ph-card);
+                background: linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(11, 18, 32, 0.98));
                 border: 1px solid var(--ph-line);
                 border-radius: 1.25rem;
                 margin: 0 0 2.5rem;
@@ -763,7 +770,7 @@ def render_global_styles() -> None:
                 text-align: left;
             }
             .hero-kicker {
-                color: var(--ph-accent-dark);
+                color: var(--ph-accent);
                 font-size: 0.82rem;
                 font-weight: 800;
                 letter-spacing: 0.16em;
@@ -796,7 +803,7 @@ def render_global_styles() -> None:
                 margin: 0.2rem 0 0;
             }
             .section-eyebrow {
-                color: var(--ph-accent-dark);
+                color: var(--ph-accent);
                 font-size: 0.78rem;
                 font-weight: 800;
                 letter-spacing: 0.14em;
@@ -819,7 +826,7 @@ def render_global_styles() -> None:
                 text-align: left;
             }
             .metric-card-label {
-                color: var(--ph-muted);
+                color: var(--ph-subtle);
                 font-size: 0.78rem;
                 font-weight: 800;
                 letter-spacing: 0.09em;
@@ -827,7 +834,7 @@ def render_global_styles() -> None:
                 text-transform: uppercase;
             }
             .metric-card-value {
-                color: var(--ph-accent-dark);
+                color: var(--ph-accent);
                 font-size: clamp(1.45rem, 2.4vw, 2rem);
                 font-weight: 720;
                 letter-spacing: -0.035em;
@@ -843,7 +850,7 @@ def render_global_styles() -> None:
             .stTabs [data-baseweb="tab-list"] {
                 gap: 0.35rem;
                 padding: 0.25rem;
-                background: var(--ph-card);
+                background: var(--ph-surface);
                 border: 1px solid var(--ph-line);
                 border-radius: 0.95rem;
             }
@@ -853,9 +860,15 @@ def render_global_styles() -> None:
                 font-weight: 700;
                 padding: 0.65rem 1.05rem;
             }
+            .stTabs [data-baseweb="tab"] * {
+                color: inherit;
+            }
             .stTabs [aria-selected="true"] {
                 background: var(--ph-accent);
-                color: #FFFFFF;
+                color: #001C1F;
+            }
+            .stTabs [aria-selected="true"] * {
+                color: #001C1F;
             }
             div[data-testid="stExpander"] {
                 background: var(--ph-card);
@@ -864,10 +877,15 @@ def render_global_styles() -> None:
                 box-shadow: none;
                 margin-bottom: 0.85rem;
             }
+            div[data-testid="stExpander"] details summary p {
+                color: var(--ph-ink);
+                font-weight: 700;
+            }
             div[data-testid="stFileUploader"],
             div[data-testid="stDataFrame"],
             div[data-testid="stDataEditor"] {
                 background: var(--ph-card);
+                border: 1px solid var(--ph-line-soft);
                 border-radius: 1rem;
             }
             .stChatMessage {
@@ -875,6 +893,22 @@ def render_global_styles() -> None:
                 border: 1px solid var(--ph-line);
                 border-radius: 1rem;
                 padding: 0.75rem;
+            }
+            div[data-testid="stAlert"] {
+                background: var(--ph-card-strong);
+                color: var(--ph-ink);
+                border: 1px solid var(--ph-line);
+            }
+            .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+                background: var(--ph-accent);
+                border: 1px solid var(--ph-accent);
+                color: #001C1F;
+                font-weight: 800;
+            }
+            .stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {
+                background: var(--ph-accent-strong);
+                border-color: var(--ph-accent-strong);
+                color: #001C1F;
             }
         </style>
         """,
@@ -975,7 +1009,7 @@ def render_timesheet_dashboard() -> None:
         month_sort = chart_data["month"].tolist()
         bars = (
             alt.Chart(chart_data)
-            .mark_bar(color="#9ec0d4")
+            .mark_bar(color="#22D3EE")
             .encode(
                 x=alt.X("month:N", sort=month_sort, title="Month"),
                 y=alt.Y("actual:Q", title="Earnings (USD)"),
@@ -984,7 +1018,7 @@ def render_timesheet_dashboard() -> None:
         )
         target_line = (
             alt.Chart(chart_data)
-            .mark_line(color="#a9cc9b", strokeWidth=3)
+            .mark_line(color="#5EEAD4", strokeWidth=3)
             .encode(
                 x=alt.X("month:N", sort=month_sort),
                 y="target:Q",
