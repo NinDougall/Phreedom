@@ -34,6 +34,7 @@ from pypdf import PdfReader
 # ---------------------------------------------------------------------------
 
 LEDGER_COLUMNS: list[str] = ["date", "description", "amount", "kind", "category", "source"]
+TIMESHEET_COLUMNS: list[str] = ["date", "project", "hours", "rate", "total_pay"]
 
 CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
 DATE_RE = re.compile(
@@ -74,11 +75,14 @@ class IngestionResult:
     message: str
     parsed: ParsedDocument | None
     registry_entry: dict[str, Any] = field(default_factory=dict)
+    is_timesheet: bool = False
+    timesheet_df: pd.DataFrame | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "was_new": self.was_new,
             "message": self.message,
+            "is_timesheet": self.is_timesheet,
             "parsed": self.parsed.to_dict() if self.parsed else None,
             "registry_entry": self.registry_entry,
         }
@@ -229,6 +233,112 @@ def parse_pdf_transactions(file_name: str, text: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=LEDGER_COLUMNS)
 
 
+def detect_timesheet_columns(columns: list[str]) -> dict[str, str | None] | None:
+    """Return a column-mapping dict when the CSV looks like a timesheet, else ``None``.
+
+    Detection requires BOTH a recognisable date column AND an hours/time column.
+    All other columns (project, rate, total) are optional.
+    """
+    date_col = infer_column(
+        columns, ("date", "work date", "entry date", "day", "log date", "period")
+    )
+    hours_col = infer_column(
+        columns,
+        ("hours", "billable hours", "hours worked", "hrs",
+         "time", "duration", "billable", "logged hours"),
+    )
+    if not date_col or not hours_col:
+        return None
+    project_col = infer_column(
+        columns, ("project", "client", "task", "description", "work", "job", "name", "workstream")
+    )
+    rate_col = infer_column(
+        columns, ("rate", "hourly rate", "rate usd", "rate per hour", "billing rate", "pay rate", "price")
+    )
+    total_col = infer_column(
+        columns, ("total", "total pay", "total amount", "amount", "pay", "earnings", "gross")
+    )
+    if total_col == hours_col:
+        total_col = None
+    return {
+        "date_col": date_col,
+        "hours_col": hours_col,
+        "project_col": project_col,
+        "rate_col": rate_col,
+        "total_col": total_col,
+    }
+
+
+def parse_timesheet_csv(file_name: str, data: bytes) -> tuple[pd.DataFrame, str]:
+    """Parse a timesheet CSV into a ``TIMESHEET_COLUMNS`` DataFrame.
+
+    Returns ``(dataframe, human-readable summary)``.
+    """
+    try:
+        df = pd.read_csv(io.BytesIO(data))
+    except Exception as exc:
+        return pd.DataFrame(columns=TIMESHEET_COLUMNS), f"CSV parse error: {exc}"
+
+    col_map = detect_timesheet_columns(list(df.columns))
+    if col_map is None:
+        return pd.DataFrame(columns=TIMESHEET_COLUMNS), "No timesheet columns detected."
+
+    dates = pd.to_datetime(df[col_map["date_col"]], errors="coerce").dt.date
+    hours = pd.to_numeric(df[col_map["hours_col"]], errors="coerce").fillna(0.0)
+    projects = (
+        df[col_map["project_col"]].fillna("Billable work").astype(str)
+        if col_map["project_col"]
+        else pd.Series(["Billable work"] * len(df), index=df.index)
+    )
+    rates = (
+        pd.to_numeric(df[col_map["rate_col"]], errors="coerce").fillna(0.0)
+        if col_map["rate_col"]
+        else pd.Series([0.0] * len(df), index=df.index)
+    )
+    if col_map["total_col"]:
+        totals = pd.to_numeric(df[col_map["total_col"]], errors="coerce")
+        totals = totals.where(totals.notna(), hours * rates)
+    else:
+        totals = hours * rates
+
+    ts_df = pd.DataFrame(
+        {
+            "date": dates,
+            "project": projects,
+            "hours": hours,
+            "rate": rates,
+            "total_pay": totals.round(2),
+        },
+        columns=TIMESHEET_COLUMNS,
+    ).dropna(subset=["date"])
+    ts_df = ts_df[ts_df["hours"] > 0].reset_index(drop=True)
+
+    total_hours = float(ts_df["hours"].sum())
+    total_pay = float(ts_df["total_pay"].sum())
+    summary = (
+        f"Timesheet '{file_name}': {len(ts_df)} entries, "
+        f"{total_hours:,.2f} hours, ${total_pay:,.2f} total pay."
+    )
+    return ts_df, summary
+
+
+def timesheet_rows_to_ledger(ts_df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Convert ``TIMESHEET_COLUMNS`` rows into ``LEDGER_COLUMNS`` income rows."""
+    if ts_df.empty:
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+    return pd.DataFrame(
+        {
+            "date": ts_df["date"],
+            "description": ts_df["project"].apply(lambda p: f"Timesheet: {p}"),
+            "amount": ts_df["total_pay"],
+            "kind": "income",
+            "category": "Billable income",
+            "source": source,
+        },
+        columns=LEDGER_COLUMNS,
+    )
+
+
 def summarize_pdf(file_name: str, text: str, ledger: pd.DataFrame) -> str:
     """Build a human-readable summary string for a parsed PDF."""
     word_count = len(text.split())
@@ -288,16 +398,29 @@ class IngestionWorker:
         IngestionResult
             ``was_new=False`` when the vault already holds a file with the
             same SHA-256 hash; otherwise ``was_new=True`` with parsed
-            transactions and a fresh registry entry.
+            transactions and a fresh registry entry.  When the file is
+            detected as a timesheet CSV, ``is_timesheet=True`` and
+            ``timesheet_df`` contains the parsed timesheet rows.
         """
-        parsed = self._parse(file_name, content)
+        is_ts, ts_df, ts_summary = self._try_parse_timesheet(file_name, content)
+
+        if is_ts:
+            summary = ts_summary
+            tx_count = len(ts_df)
+            file_type = "timesheet"
+        else:
+            parsed = self._parse(file_name, content)
+            summary = parsed.summary
+            tx_count = len(parsed.transactions)
+            file_type = "ledger"
 
         entry = self._bridge.save_document(
             file_name,
             content,
             {
-                "transaction_count": len(parsed.transactions),
-                "summary": parsed.summary,
+                "transaction_count": tx_count,
+                "summary": summary,
+                "file_type": file_type,
             },
         )
 
@@ -307,13 +430,30 @@ class IngestionWorker:
                 message=f"**{file_name}** is already in the vault (skipped duplicate).",
                 parsed=None,
                 registry_entry=entry,
+                is_timesheet=is_ts,
+                timesheet_df=None,
+            )
+
+        if is_ts:
+            ledger_rows = timesheet_rows_to_ledger(ts_df, file_name)
+            ts_parsed = ParsedDocument(file_name, ledger_rows, summary)
+            ts_parsed.raw_json = ts_parsed.to_dict()
+            return IngestionResult(
+                was_new=True,
+                message=summary,
+                parsed=ts_parsed,
+                registry_entry=entry,
+                is_timesheet=True,
+                timesheet_df=ts_df,
             )
 
         return IngestionResult(
             was_new=True,
-            message=parsed.summary,
-            parsed=parsed,
+            message=parsed.summary,  # type: ignore[possibly-undefined]
+            parsed=parsed,           # type: ignore[possibly-undefined]
             registry_entry=entry,
+            is_timesheet=False,
+            timesheet_df=None,
         )
 
     def reparse(self, file_name: str, content: bytes) -> ParsedDocument:
@@ -327,6 +467,28 @@ class IngestionWorker:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _try_parse_timesheet(
+        file_name: str, content: bytes
+    ) -> tuple[bool, pd.DataFrame, str]:
+        """Attempt to parse content as a timesheet CSV.
+
+        Returns ``(is_timesheet, ts_df, summary)``.  ``is_timesheet`` is
+        ``False`` for non-CSV files or when no timesheet columns are found.
+        """
+        if not file_name.lower().endswith(".csv"):
+            return False, pd.DataFrame(columns=TIMESHEET_COLUMNS), ""
+        try:
+            sample = pd.read_csv(io.BytesIO(content), nrows=0)
+            if detect_timesheet_columns(list(sample.columns)) is None:
+                return False, pd.DataFrame(columns=TIMESHEET_COLUMNS), ""
+            ts_df, summary = parse_timesheet_csv(file_name, content)
+            if ts_df.empty:
+                return False, pd.DataFrame(columns=TIMESHEET_COLUMNS), ""
+            return True, ts_df, summary
+        except Exception:
+            return False, pd.DataFrame(columns=TIMESHEET_COLUMNS), ""
 
     def _parse(self, file_name: str, content: bytes) -> ParsedDocument:
         """Route to the correct parser based on file extension."""

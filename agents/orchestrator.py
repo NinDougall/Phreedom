@@ -144,6 +144,8 @@ class OrchestratorAgent:
                 "was_new": False,
                 "message": result.message,
                 "ledger": current_ledger if current_ledger is not None else pd.DataFrame(),
+                "timesheet": None,
+                "is_timesheet": result.is_timesheet,
                 "ingestion_result": result.to_dict(),
                 "tax_summary": {},
             }
@@ -152,6 +154,11 @@ class OrchestratorAgent:
         assert result.parsed is not None
         new_ledger = self._merge_ledger(current_ledger, result.parsed.transactions)
         self._bridge.save_ledger(new_ledger)
+
+        # ── Handle timesheet data ─────────────────────────────────────
+        new_timesheet: pd.DataFrame | None = None
+        if result.is_timesheet and result.timesheet_df is not None:
+            new_timesheet = result.timesheet_df
 
         # ── Node B: Tax compute ───────────────────────────────────────
         profile = self._bridge.fetch_profile()
@@ -164,6 +171,8 @@ class OrchestratorAgent:
             "was_new": True,
             "message": result.message,
             "ledger": new_ledger,
+            "timesheet": new_timesheet,
+            "is_timesheet": result.is_timesheet,
             "ingestion_result": result.to_dict(),
             "tax_summary": summary.to_dict(),
         }
@@ -280,6 +289,8 @@ class OrchestratorAgent:
             "was_new": True,
             "message": parsed.summary,
             "ledger": new_ledger,
+            "timesheet": None,
+            "is_timesheet": False,
             "ingestion_result": parsed.to_dict(),
             "tax_summary": summary.to_dict(),
         }

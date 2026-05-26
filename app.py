@@ -730,69 +730,185 @@ def render_dashboard(tax_rate: float) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _render_timesheet_table(
+    df: pd.DataFrame, key: str, download_label: str, download_fname: str
+) -> None:
+    """Render a clean TIMESHEET_COLUMNS DataFrame with formatting and download."""
+    if df.empty:
+        return
+    disp = df.copy()
+    disp["date"] = pd.to_datetime(disp["date"]).dt.strftime("%Y-%m-%d")
+    disp = disp.rename(columns={
+        "date": "Date", "project": "Project",
+        "hours": "Hours", "rate": "Rate (USD)", "total_pay": "Total Pay",
+    })
+    st.dataframe(
+        disp.style.format({"Hours": "{:.2f}", "Rate (USD)": "${:,.2f}", "Total Pay": "${:,.2f}"}),
+        use_container_width=True,
+        hide_index=True,
+        key=key,
+    )
+    st.download_button(
+        download_label,
+        df.to_csv(index=False).encode(),
+        file_name=download_fname,
+        mime="text/csv",
+        key=f"{key}_dl",
+    )
+
+
 def render_timesheet(tax_rate: float) -> None:
-    _section("Earnings dashboard", "Monthly target",
-             "Track billable hours and pay against your monthly earnings goal.")
+    """Timesheet page: file upload, manual entry, monthly dashboard, full log."""
 
-    settings_col, entry_col = st.columns([1, 1.35], gap="large")
-    with settings_col:
-        st.markdown("##### Target settings")
-        monthly_target = st.number_input("Monthly target (USD)", min_value=0.0, value=4160.0,
-                                         step=100.0, format="%.2f")
-        base_rate = st.number_input("Base hourly rate (USD)", min_value=0.01, value=26.0,
-                                    step=1.0, format="%.2f")
-        as_of = st.date_input("Dashboard as of", value=date.today())
+    # ── Section 1: Add hours ────────────────────────────────────────────────
+    _section("Add hours", "Intake",
+             "Upload a timesheet CSV or add entries manually. "
+             "All data is saved to the permanent vault and survives app restarts.")
 
-    with entry_col:
-        st.markdown("##### Log hours worked")
+    upload_col, pad_col = st.columns([0.55, 0.45], gap="large")
+    with upload_col:
+        st.markdown("##### Upload timesheet file")
+        ts_upload = st.file_uploader(
+            "Drop a timesheet CSV here",
+            type=["csv"],
+            accept_multiple_files=False,
+            help=(
+                "Supported columns: date, project/client, hours, rate, total_pay. "
+                "Column names are detected automatically."
+            ),
+            key="ts_page_uploader",
+        )
+        if ts_upload is not None:
+            cache_key = f"_ts_ingested_{ts_upload.name}_{ts_upload.size}"
+            if cache_key not in st.session_state:
+                orchestrator = _get_orchestrator()
+                with st.spinner(f"Vaulting {ts_upload.name}..."):
+                    result = orchestrator.handle_upload(
+                        ts_upload.name, ts_upload.getvalue(), st.session_state.ledger
+                    )
+                st.session_state[cache_key] = True
+                if result["was_new"]:
+                    st.session_state.ledger = result["ledger"]
+                    if result.get("is_timesheet") and result.get("timesheet") is not None:
+                        new_ts = result["timesheet"]
+                        # Deduplicate against existing timesheet rows by (date, project, hours)
+                        existing_ts = st.session_state.timesheet
+                        if not existing_ts.empty:
+                            existing_keys = set(
+                                zip(
+                                    existing_ts["date"].astype(str),
+                                    existing_ts["project"].astype(str),
+                                    existing_ts["hours"].astype(str),
+                                )
+                            )
+                            new_ts = new_ts[
+                                ~new_ts.apply(
+                                    lambda r: (
+                                        str(r["date"]), str(r["project"]), str(r["hours"])
+                                    ) in existing_keys,
+                                    axis=1,
+                                )
+                            ]
+                        if not new_ts.empty:
+                            st.session_state.timesheet = pd.concat(
+                                [st.session_state.timesheet, new_ts], ignore_index=True
+                            )
+                            _flush_timesheet()
+                    st.success(result["message"])
+                    _status(f"Timesheet file ingested: {result['message']}")
+                    st.rerun()
+                else:
+                    st.info(result["message"])
+
+        with st.expander("Expected CSV format", expanded=False):
+            st.markdown(
+                """
+Column names are matched flexibly (case-insensitive, spaces or underscores).
+
+| Column | Aliases accepted |
+|---|---|
+| **date** | work date, entry date, day |
+| **project** | client, task, description, job |
+| **hours** | billable hours, hrs, duration, time |
+| **rate** | hourly rate, rate usd, pay rate |
+| **total_pay** | total, amount, pay, earnings |
+
+Rows with `hours = 0` are skipped. Rate and total are optional — if both are
+absent the row is stored with `$0.00` pay.
+                """
+            )
+
+    with pad_col:
+        st.markdown("##### Manual entry")
         with st.form("ts_form", clear_on_submit=True):
             f_date = st.date_input("Date", value=date.today())
             f_proj = st.text_input("Project / client", placeholder="Client name or workstream")
             fc1, fc2 = st.columns(2)
             with fc1:
-                f_hours = st.number_input("Hours", min_value=0.0, value=0.0, step=0.25, format="%.2f")
+                f_hours = st.number_input("Hours", min_value=0.0, value=0.0,
+                                          step=0.25, format="%.2f")
             with fc2:
-                f_rate = st.number_input("Rate (USD/hr)", min_value=0.0, value=base_rate, step=1.0, format="%.2f")
+                f_rate = st.number_input("Rate (USD/hr)", min_value=0.0, value=26.0,
+                                         step=1.0, format="%.2f")
             submitted = st.form_submit_button("Add entry", use_container_width=True)
         if submitted:
             if f_hours <= 0 or f_rate <= 0:
-                st.warning("Enter hours > 0 and a rate > 0 before adding an entry.")
+                st.warning("Enter hours > 0 and a rate > 0.")
                 _status("Timesheet entry error: enter positive hours and rate.")
             else:
                 add_timesheet_entry(f_date, f_proj, f_hours, f_rate)
                 st.success(
                     f"Added {f_hours:.2f} h @ ${f_rate:,.2f}/hr = "
-                    f"{format_usd(f_hours * f_rate)} — saved to disk."
+                    f"{format_usd(f_hours * f_rate)} — persisted to disk."
                 )
-                _status("Timesheet entry added and persisted to disk.")
+                _status("Timesheet entry added and persisted.")
+                st.rerun()
+
+    # ── Section 2: Monthly dashboard ───────────────────────────────────────
+    _section("Monthly dashboard", "Target tracking",
+             "Progress metrics and pace indicators for the selected period.")
+
+    _, settings_col, pad_mid, as_of_col, _ = st.columns([0.04, 0.4, 0.04, 0.28, 0.24], gap="small")
+    with settings_col:
+        monthly_target = st.number_input(
+            "Monthly target (USD)", min_value=0.0, value=4160.0,
+            step=100.0, format="%.2f", help="Your monthly earnings goal.")
+        base_rate = st.number_input(
+            "Base hourly rate (USD)", min_value=0.01, value=26.0,
+            step=1.0, format="%.2f", help="Used to derive expected monthly billable hours.")
+    with as_of_col:
+        as_of = st.date_input("Dashboard as of", value=date.today())
 
     dash = earnings_dashboard_summary(st.session_state.timesheet, monthly_target, base_rate, as_of)
     _divider_space(0.25)
+
     st.markdown(
         f"<p class='nd-note'><strong>Period:</strong> "
         f"{dash['month_start'].strftime('%b %d')} – {dash['month_end'].strftime('%b %d, %Y')}"
-        f" · Target: <strong>{format_usd(monthly_target)}</strong></p>",
+        f" &nbsp;·&nbsp; Target: <strong>{format_usd(monthly_target)}</strong>"
+        f" &nbsp;·&nbsp; {int(dash['elapsed_ratio'] * 100)}% of month elapsed</p>",
         unsafe_allow_html=True,
     )
 
     _, k1, k2, k3, k4, _ = st.columns([0.03, 1, 1, 1, 1, 0.03], gap="large")
-    with k1: _kpi("Month Earnings", format_usd(dash["actual_pay"]))
-    with k2: _kpi("Month Target", format_usd(dash["monthly_target"]))
-    with k3: _kpi("YTD Earnings", format_usd(dash["ytd_pay"]))
-    with k4: _kpi("Annual Target", format_usd(dash["annual_target"]))
+    with k1: _kpi("Month Earnings",  format_usd(dash["actual_pay"]))
+    with k2: _kpi("Month Target",    format_usd(dash["monthly_target"]))
+    with k3: _kpi("YTD Earnings",    format_usd(dash["ytd_pay"]))
+    with k4: _kpi("Annual Target",   format_usd(dash["annual_target"]))
     _divider_space(0.5)
 
     _, s1, s2, s3, s4, _ = st.columns([0.03, 1, 1, 1, 1, 0.03], gap="large")
-    with s1: _kpi("Hours Ahead/Behind", f"{dash['hours_gap']:+,.2f}", dash["hours_gap"])
-    with s2: _kpi("Earnings vs Today", format_usd(dash["earnings_to_date_gap"]), dash["earnings_to_date_gap"])
-    with s3: _kpi("vs Base Rate", format_usd(dash["earnings_vs_base_rate"]), dash["earnings_vs_base_rate"])
-    with s4: _kpi("Prev Month Hrs Δ", f"{dash['prev_month_hours_gap']:+,.2f}", dash["prev_month_hours_gap"])
+    with s1: _kpi("Hours Ahead/Behind",   f"{dash['hours_gap']:+,.2f}", dash["hours_gap"])
+    with s2: _kpi("Earnings vs Pace",     format_usd(dash["earnings_to_date_gap"]), dash["earnings_to_date_gap"])
+    with s3: _kpi("vs Base Rate",         format_usd(dash["earnings_vs_base_rate"]), dash["earnings_vs_base_rate"])
+    with s4: _kpi("Prev Month Hrs Delta", f"{dash['prev_month_hours_gap']:+,.2f}", dash["prev_month_hours_gap"])
+
     _divider_space(0.5)
 
-    with st.expander("📊  Chart & tracking variables", expanded=True):
+    with st.expander("Chart & tracking variables", expanded=True):
         chart_col, table_col = st.columns([1.3, 1], gap="large")
-        chart_data = dash["monthly_chart"]
-        month_sort = chart_data["month"].tolist()
+        chart_data  = dash["monthly_chart"]
+        month_sort  = chart_data["month"].tolist()
         with chart_col:
             bars = (
                 alt.Chart(chart_data)
@@ -800,8 +916,7 @@ def render_timesheet(tax_rate: float) -> None:
                 .encode(
                     x=alt.X("month:N", sort=month_sort, title=None,
                              axis=alt.Axis(labelColor="#C4B8DF")),
-                    y=alt.Y("actual:Q", title="USD",
-                             axis=alt.Axis(labelColor="#C4B8DF")),
+                    y=alt.Y("actual:Q", title="USD", axis=alt.Axis(labelColor="#C4B8DF")),
                     tooltip=["month", alt.Tooltip("actual:Q", format="$,.2f", title="Actual")],
                 )
             )
@@ -825,58 +940,130 @@ def render_timesheet(tax_rate: float) -> None:
             st.dataframe(
                 pd.DataFrame(
                     [
-                        ["Base Rate", format_usd(dash["base_rate"])],
-                        ["Expected hrs (month)", f"{dash['expected_month_hours']:,.2f}"],
-                        ["Expected hrs (today)", f"{dash['expected_hours_to_date']:,.2f}"],
-                        ["Actual hours", f"{dash['actual_hours']:,.2f}"],
-                        ["Avg billable rate", format_usd(dash["avg_rate"])],
+                        ["Base Rate",               format_usd(dash["base_rate"])],
+                        ["Expected hrs (month)",    f"{dash['expected_month_hours']:,.2f}"],
+                        ["Expected hrs (today)",    f"{dash['expected_hours_to_date']:,.2f}"],
+                        ["Actual hours",            f"{dash['actual_hours']:,.2f}"],
+                        ["Avg billable rate",       format_usd(dash["avg_rate"])],
                         ["Expected earnings (today)", format_usd(dash["expected_earnings_to_date"])],
-                        ["Actual earnings", format_usd(dash["actual_pay"])],
-                        ["Earnings gap", format_usd(dash["earnings_to_date_gap"])],
+                        ["Actual earnings",         format_usd(dash["actual_pay"])],
+                        ["Earnings gap",            format_usd(dash["earnings_to_date_gap"])],
                     ],
                     columns=["Metric", "Value"],
                 ),
                 use_container_width=True, hide_index=True,
             )
 
-    _section("Timesheet log", "Entries", "Billable entries for this month — persisted to disk.")
-    _, sc1, sc2, sc3 = st.columns([0.03, 1, 1, 1], gap="large")
-    with sc1: _kpi("Avg billable rate", format_usd(dash["avg_rate"]))
-    with sc2: _kpi("Total hours", f"{dash['actual_hours']:,.2f}")
-    with sc3: _kpi("Total pay", format_usd(dash["actual_pay"]))
+    # ── Section 3: Monthly timesheet view ─────────────────────────────────
+    _section("This month", "Entries",
+             f"All entries for {dash['month_start'].strftime('%B %Y')}.")
+
+    current_entries = dash["current_month_entries"].copy()
+
+    _, sm1, sm2, sm3, _ = st.columns([0.04, 1, 1, 1, 0.04], gap="large")
+    with sm1: _kpi("Total hours",       f"{dash['actual_hours']:,.2f}")
+    with sm2: _kpi("Avg billable rate", format_usd(dash["avg_rate"]))
+    with sm3: _kpi("Total pay",         format_usd(dash["actual_pay"]))
 
     _divider_space(0.5)
-    entries = dash["current_month_entries"]
-    if entries.empty:
-        st.info("No timesheet entries yet. Add hours worked above.")
-    else:
-        disp = entries.copy()
-        disp["date"] = pd.to_datetime(disp["date"]).dt.strftime("%Y-%m-%d")
-        disp = disp.rename(columns={
-            "date": "Date", "project": "Project",
-            "hours": "Hours", "rate": "Rate (USD)", "total_pay": "Total Pay",
-        })
-        st.dataframe(
-            disp.style.format({"Hours": "{:.2f}", "Rate (USD)": "${:,.2f}", "Total Pay": "${:,.2f}"}),
-            use_container_width=True, hide_index=True,
+
+    _, tbl_col, _ = st.columns([0.04, 0.92, 0.04])
+    with tbl_col:
+        if current_entries.empty:
+            st.info(
+                "No entries for the selected month. "
+                "Upload a timesheet CSV above or add entries manually."
+            )
+        else:
+            _render_timesheet_table(
+                current_entries,
+                key="ts_monthly",
+                download_label="Download this month",
+                download_fname=f"timesheet-{as_of.strftime('%Y-%m')}.csv",
+            )
+
+    # ── Section 4: Full timesheet history (all entries) ─────────────────
+    all_entries = normalized_timesheet(st.session_state.timesheet)
+
+    if not all_entries.empty:
+        _section("Full timesheet history", "All entries",
+                 f"{len(all_entries)} total entries across all periods — persisted to disk.")
+
+        all_entries_dated = all_entries.copy()
+        all_entries_dated["_ym"] = pd.to_datetime(
+            all_entries_dated["date"], errors="coerce"
+        ).dt.to_period("M")
+        months_available = sorted(
+            all_entries_dated["_ym"].dropna().unique().tolist(),
+            reverse=True,
         )
-        st.download_button(
-            "Download timesheet CSV",
-            entries.to_csv(index=False).encode(),
-            file_name=f"timesheet-{as_of.strftime('%Y-%m')}.csv",
-            mime="text/csv",
-        )
-    _divider_space(0.25)
-    if st.button("Clear timesheet entries",
-                 help="Removes timesheet entries and their ledger rows from disk."):
-        _status("Timesheet entries cleared from disk.")
-        st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
-        st.session_state.ledger = st.session_state.ledger[
-            st.session_state.ledger["source"] != "Timesheet"
-        ]
-        _flush_timesheet()
-        _flush_ledger()
-        st.rerun()
+        months_str = [str(m) for m in months_available]
+
+        _, filter_col, _, pad_right = st.columns([0.04, 0.35, 0.57, 0.04])
+        with filter_col:
+            month_filter = st.selectbox(
+                "Filter by month",
+                ["All periods"] + months_str,
+                index=0,
+                key="ts_history_filter",
+                help="Narrow the full log to a specific month.",
+            )
+
+        if month_filter != "All periods":
+            display_df = all_entries_dated[
+                all_entries_dated["_ym"].astype(str) == month_filter
+            ].drop(columns="_ym")
+        else:
+            display_df = all_entries.copy()
+
+        _, search_col, _, _ = st.columns([0.04, 0.45, 0.47, 0.04])
+        with search_col:
+            search_term = st.text_input(
+                "Search project / client",
+                placeholder="Type to filter by project name…",
+                key="ts_project_search",
+            )
+        if search_term:
+            display_df = display_df[
+                display_df["project"].str.contains(search_term, case=False, na=False)
+            ]
+
+        _, full_tbl, _ = st.columns([0.04, 0.92, 0.04])
+        with full_tbl:
+            if display_df.empty:
+                st.info("No entries match the current filter.")
+            else:
+                _render_timesheet_table(
+                    display_df.reset_index(drop=True),
+                    key="ts_history",
+                    download_label="Download filtered view",
+                    download_fname=f"timesheet-history-{date.today()}.csv",
+                )
+                total_h = float(display_df["hours"].sum())
+                total_p = float(display_df["total_pay"].sum())
+                avg_r   = total_p / total_h if total_h else 0.0
+                st.markdown(
+                    f"<p class='nd-note'>"
+                    f"<strong>{len(display_df)}</strong> entries shown &nbsp;·&nbsp; "
+                    f"<strong>{total_h:,.2f} h</strong> total &nbsp;·&nbsp; "
+                    f"<strong>{format_usd(total_p)}</strong> total pay &nbsp;·&nbsp; "
+                    f"<strong>{format_usd(avg_r)}/hr</strong> avg rate</p>",
+                    unsafe_allow_html=True,
+                )
+
+    _divider_space(0.5)
+    _, btn_col, _ = st.columns([0.04, 0.35, 0.61])
+    with btn_col:
+        if st.button("Clear all timesheet entries",
+                     help="Removes all timesheet entries and their ledger rows from disk."):
+            _status("All timesheet entries cleared from disk.")
+            st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
+            st.session_state.ledger = st.session_state.ledger[
+                ~st.session_state.ledger["source"].isin(["Timesheet"])
+            ]
+            _flush_timesheet()
+            _flush_ledger()
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +1092,7 @@ def render_chat_page(tax_rate: float, business_type: str, tax_notes: str) -> Non
             orchestrator = _get_orchestrator()
             answer = orchestrator.handle_chat(
                 prompt=prompt,
-                conversation=st.session_state.messages[:-1],  # exclude the just-appended user msg
+                conversation=st.session_state.messages[:-1],
                 profile={
                     "tax_rate": tax_rate,
                     "business_type": business_type,
