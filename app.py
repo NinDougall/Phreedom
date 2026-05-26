@@ -1,15 +1,15 @@
-"""N-Deavour Alignment — personal financial agent.
-
-Single-file Streamlit app. Storage is routed through storage_bridge.py (local-first,
-cloud-ready). Session state acts as an in-memory cache; every mutation is immediately
-flushed to disk so data survives browser refreshes and application restarts.
+"""N-Deavour Alignment — personal financial agent (multi-agent edition).
 
 Architecture
 ────────────
+  agents.OrchestratorAgent   central manager — delegates to workers
+    ├── IngestionWorker       parse / vault / dedup (file uploads)
+    ├── TaxEngine             financial metrics, tax reserve, context
+    └── AdvisorUI             Phreedom chat persona, OpenAI routing
+
   storage_bridge.StorageBridge   persistent local vault + manifest
   init_state()                   loads disk → session on cold start
-  ingest_to_vault()              hashes, dedupes, vaults, parses, persists
-  render_*()                     pure presentation – no I/O except through bridge
+  render_*()                     pure presentation – no I/O except through orchestrator
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from pypdf import PdfReader
 
+from agents import OrchestratorAgent
 from storage_bridge import get_bridge
 
 
@@ -38,25 +38,6 @@ from storage_bridge import get_bridge
 LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
 APP_PAGES = ["Dashboard", "Timesheet", "Chat"]
-
-CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
-DATE_RE = re.compile(
-    r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b)"
-)
-
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
-
-
-@dataclass
-class ParsedDocument:
-    source: str
-    transactions: pd.DataFrame
-    summary: str
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +53,13 @@ _DEFAULT_ASSISTANT_MSG = {
         "income, expenses, cash flow, and tax savings."
     ),
 }
+
+
+def _get_orchestrator() -> OrchestratorAgent:
+    """Return the process-level OrchestratorAgent singleton."""
+    if "orchestrator" not in st.session_state:
+        st.session_state.orchestrator = OrchestratorAgent(get_bridge())
+    return st.session_state.orchestrator
 
 
 def init_state() -> None:
@@ -92,14 +80,17 @@ def init_state() -> None:
     st.session_state.ts_uploader_rev = 0
     st.session_state.ts_staged_file = None
 
-    # Profile settings — loaded from manifest, used as widget defaults
+    # File staging for explicit Submit flow on the Timesheet page
+    st.session_state.ts_uploader_rev = 0
+    st.session_state.ts_staged_file = None
+
     st.session_state.profile_business_type = profile.get("business_type", "")
     st.session_state.profile_tax_rate = float(profile.get("tax_reserve_rate", 0.30))
     st.session_state.profile_tax_notes = profile.get("tax_notes", "")
 
 
 # ---------------------------------------------------------------------------
-# Disk persistence helpers
+# Disk persistence helpers (thin wrappers — real I/O is in the bridge)
 # ---------------------------------------------------------------------------
 
 
@@ -116,497 +107,7 @@ def _flush_chat() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------------
-
-
-def infer_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
-    normalized = {c.lower().strip().replace("_", " "): c for c in columns}
-    for candidate in candidates:
-        candidate = candidate.lower()
-        for norm, orig in normalized.items():
-            if candidate == norm or candidate in norm:
-                return orig
-    return None
-
-
-def coerce_money(value: Any) -> float:
-    if pd.isna(value):
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return 0.0
-    negative = text.startswith("(") and text.endswith(")")
-    text = text.replace(",", "").replace("(", "").replace(")", "")
-    text = re.sub(r"[^0-9.\-]", "", text)
-    if text in ("", ".", "-"):
-        return 0.0
-    try:
-        return -abs(float(text)) if negative else float(text)
-    except ValueError:
-        return 0.0
-
-
-def classify_kind(amount: float, explicit_value: Any = None) -> str:
-    if explicit_value is not None:
-        v = str(explicit_value).lower()
-        if any(k in v for k in ("income", "credit", "revenue", "deposit")):
-            return "income"
-        if any(k in v for k in ("expense", "debit", "withdrawal", "charge")):
-            return "expense"
-    return "income" if amount > 0 else "expense"
-
-
-def normalize_csv(file_name: str, data: bytes) -> ParsedDocument:
-    try:
-        df = pd.read_csv(io.BytesIO(data))
-    except Exception as exc:
-        return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), f"CSV parse error: {exc}")
-    if df.empty:
-        return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), "CSV was empty.")
-    cols = list(df.columns)
-    date_col = infer_column(cols, ("date", "posted", "transaction date", "trans date", "value date"))
-    desc_col = infer_column(cols, ("description", "memo", "details", "narrative", "payee", "reference"))
-    amount_col = infer_column(cols, ("amount", "net amount", "total", "value"))
-    debit_col = infer_column(cols, ("debit", "withdrawal", "charge", "payment"))
-    credit_col = infer_column(cols, ("credit", "deposit", "income"))
-    kind_col = infer_column(cols, ("type", "transaction type", "kind"))
-    category_col = infer_column(cols, ("category", "class", "classification"))
-    if amount_col:
-        amounts = df[amount_col].map(coerce_money)
-    elif debit_col or credit_col:
-        debits = df[debit_col].map(coerce_money) if debit_col else pd.Series(0.0, index=df.index)
-        credits = df[credit_col].map(coerce_money) if credit_col else pd.Series(0.0, index=df.index)
-        amounts = credits - debits
-    else:
-        num_cols = df.select_dtypes(include="number").columns.tolist()
-        if not num_cols:
-            return ParsedDocument(file_name, pd.DataFrame(columns=LEDGER_COLUMNS), "No numeric column found.")
-        amounts = df[num_cols[0]].map(coerce_money)
-    dates = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
-    descriptions = df[desc_col].fillna("Imported transaction") if desc_col else "Imported transaction"
-    categories = df[category_col].fillna("Uncategorized") if category_col else "Uncategorized"
-    kinds = [
-        classify_kind(a, df[kind_col].iloc[i] if kind_col else None)
-        for i, a in enumerate(amounts)
-    ]
-    ledger = pd.DataFrame(
-        {
-            "date": dates.dt.date if hasattr(dates, "dt") else dates,
-            "description": descriptions,
-            "amount": amounts,
-            "kind": kinds,
-            "category": categories,
-            "source": file_name,
-        },
-        columns=LEDGER_COLUMNS,
-    ).dropna(subset=["date"])
-    income = float(ledger.loc[ledger["kind"] == "income", "amount"].sum())
-    expenses = float(ledger.loc[ledger["kind"] == "expense", "amount"].abs().sum())
-    summary = (
-        f"Imported {len(ledger)} CSV transactions from {file_name}: "
-        f"${income:,.2f} income and ${expenses:,.2f} expenses."
-    )
-    return ParsedDocument(file_name, ledger, summary)
-
-
-def detect_timesheet_columns(columns: list[str]) -> dict[str, str | None] | None:
-    """Return a column-mapping dict if the CSV looks like a timesheet; otherwise None.
-
-    Detection criteria: must have BOTH a recognisable date column AND a recognisable
-    hours/time column. All other columns (project, rate, total) are optional.
-    """
-    date_col = infer_column(columns, ("date", "work date", "entry date", "day", "log date", "period"))
-    hours_col = infer_column(columns, ("hours", "billable hours", "hours worked", "hrs",
-                                       "time", "duration", "billable", "logged hours"))
-    if not date_col or not hours_col:
-        return None
-    project_col = infer_column(columns, ("project", "client", "task", "description",
-                                          "work", "job", "name", "workstream"))
-    rate_col    = infer_column(columns, ("rate", "hourly rate", "rate usd", "rate per hour",
-                                          "billing rate", "pay rate", "price"))
-    total_col   = infer_column(columns, ("total", "total pay", "total amount", "amount",
-                                          "pay", "earnings", "gross"))
-    # Avoid mapping total to the hours column
-    if total_col == hours_col:
-        total_col = None
-    return {
-        "date_col":    date_col,
-        "hours_col":   hours_col,
-        "project_col": project_col,
-        "rate_col":    rate_col,
-        "total_col":   total_col,
-    }
-
-
-def parse_timesheet_csv(file_name: str, data: bytes) -> tuple[pd.DataFrame, str]:
-    """Parse a timesheet CSV into a TIMESHEET_COLUMNS DataFrame.
-
-    Returns (dataframe, human-readable summary).
-    """
-    try:
-        df = pd.read_csv(io.BytesIO(data))
-    except Exception as exc:
-        return pd.DataFrame(columns=TIMESHEET_COLUMNS), f"CSV parse error: {exc}"
-
-    col_map = detect_timesheet_columns(list(df.columns))
-    if col_map is None:
-        return pd.DataFrame(columns=TIMESHEET_COLUMNS), "No timesheet columns detected."
-
-    dates   = pd.to_datetime(df[col_map["date_col"]], errors="coerce").dt.date
-    hours   = pd.to_numeric(df[col_map["hours_col"]], errors="coerce").fillna(0.0)
-    projects = (
-        df[col_map["project_col"]].fillna("Billable work").astype(str)
-        if col_map["project_col"]
-        else pd.Series(["Billable work"] * len(df), index=df.index)
-    )
-    rates = (
-        pd.to_numeric(df[col_map["rate_col"]], errors="coerce").fillna(0.0)
-        if col_map["rate_col"]
-        else pd.Series([0.0] * len(df), index=df.index)
-    )
-    if col_map["total_col"]:
-        totals = pd.to_numeric(df[col_map["total_col"]], errors="coerce")
-        totals = totals.where(totals.notna(), hours * rates)
-    else:
-        totals = (hours * rates)
-
-    ts_df = pd.DataFrame(
-        {
-            "date":      dates,
-            "project":   projects,
-            "hours":     hours,
-            "rate":      rates,
-            "total_pay": totals.round(2),
-        },
-        columns=TIMESHEET_COLUMNS,
-    ).dropna(subset=["date"])
-    ts_df = ts_df[ts_df["hours"] > 0].reset_index(drop=True)
-
-    total_hours = float(ts_df["hours"].sum())
-    total_pay   = float(ts_df["total_pay"].sum())
-    summary = (
-        f"Timesheet '{file_name}': {len(ts_df)} entries, "
-        f"{total_hours:,.2f} hours, ${total_pay:,.2f} total pay."
-    )
-    return ts_df, summary
-
-
-def timesheet_rows_to_ledger(ts_df: pd.DataFrame, source: str) -> pd.DataFrame:
-    """Convert TIMESHEET_COLUMNS rows into LEDGER_COLUMNS income rows."""
-    if ts_df.empty:
-        return pd.DataFrame(columns=LEDGER_COLUMNS)
-    return pd.DataFrame(
-        {
-            "date":        ts_df["date"],
-            "description": ts_df["project"].apply(lambda p: f"Timesheet: {p}"),
-            "amount":      ts_df["total_pay"],
-            "kind":        "income",
-            "category":    "Billable income",
-            "source":      source,
-        },
-        columns=LEDGER_COLUMNS,
-    )
-
-
-
-def extract_pdf_text(data: bytes) -> str:
-    reader = PdfReader(io.BytesIO(data))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def parse_pdf_transactions(file_name: str, text: str) -> pd.DataFrame:
-    rows = []
-    for line in text.splitlines():
-        date_match = DATE_RE.search(line)
-        if not date_match:
-            continue
-        currency_matches = CURRENCY_RE.findall(line)
-        if not currency_matches:
-            continue
-        try:
-            entry_date = pd.to_datetime(date_match.group("date"), dayfirst=False).date()
-        except Exception:
-            continue
-        amount = coerce_money(currency_matches[-1])
-        description = line[: date_match.start()].strip() or line.strip()[:80]
-        rows.append({
-            "date": entry_date, "description": description, "amount": amount,
-            "kind": classify_kind(amount), "category": "Uncategorized", "source": file_name,
-        })
-    return pd.DataFrame(rows, columns=LEDGER_COLUMNS)
-
-
-def summarize_pdf(file_name: str, text: str, ledger: pd.DataFrame) -> str:
-    word_count = len(text.split())
-    if ledger.empty:
-        return (
-            f"PDF '{file_name}' imported ({word_count:,} words). "
-            "No dated transaction rows were detected automatically."
-        )
-    income = float(ledger.loc[ledger["kind"] == "income", "amount"].sum())
-    expenses = float(ledger.loc[ledger["kind"] == "expense", "amount"].abs().sum())
-    return (
-        f"PDF '{file_name}': {len(ledger)} transaction rows "
-        f"(${income:,.2f} income, ${expenses:,.2f} expenses, {word_count:,} words)."
-    )
-
-
-def parse_upload(uploaded_file: Any) -> ParsedDocument:
-    name = uploaded_file.name
-    data = uploaded_file.getvalue()
-    if name.lower().endswith(".csv"):
-        return normalize_csv(name, data)
-    text = extract_pdf_text(data)
-    ledger = parse_pdf_transactions(name, text)
-    summary = summarize_pdf(name, text, ledger)
-    return ParsedDocument(name, ledger, summary)
-
-
-def append_transactions(transactions: pd.DataFrame) -> None:
-    if transactions.empty:
-        return
-    st.session_state.ledger = pd.concat(
-        [st.session_state.ledger, transactions[LEDGER_COLUMNS]], ignore_index=True
-    )
-
-
-# ---------------------------------------------------------------------------
-# Vault-based ingestion pipeline (replaces raw st.file_uploader logic)
-# ---------------------------------------------------------------------------
-
-
-def ingest_to_vault(uploaded_file: Any) -> tuple[bool, str]:
-    """Hash, deduplicate, vault, parse, and persist an uploaded file.
-
-    If the CSV is identified as a timesheet (has date + hours columns), its rows
-    are written to BOTH st.session_state.timesheet AND the ledger as income entries.
-    All other files are routed to the ledger only.
-
-    Returns (was_new: bool, status_message: str).
-    """
-    bridge = get_bridge()
-    name = uploaded_file.name
-    content = uploaded_file.getvalue()
-    is_csv = name.lower().endswith(".csv")
-
-    # ── Detect timesheet CSV before vaulting so we can tag metadata ──────
-    ts_df: pd.DataFrame | None = None
-    ts_summary: str = ""
-    if is_csv:
-        try:
-            import io as _io
-            import pandas as _pd
-            _sample = _pd.read_csv(_io.BytesIO(content), nrows=0)
-            if detect_timesheet_columns(list(_sample.columns)) is not None:
-                ts_df, ts_summary = parse_timesheet_csv(name, content)
-        except Exception:
-            ts_df = None
-
-    # ── Determine summary and transaction count for manifest ─────────────
-    if ts_df is not None and not ts_df.empty:
-        summary = ts_summary
-        tx_count = len(ts_df)
-        file_type = "timesheet"
-    else:
-        parsed = parse_upload(uploaded_file)
-        summary = parsed.summary
-        tx_count = len(parsed.transactions)
-        file_type = "ledger"
-
-    # ── Vault with dedup check ────────────────────────────────────────────
-    entry = bridge.save_document(
-        name,
-        content,
-        {
-            "transaction_count": tx_count,
-            "summary": summary,
-            "file_type": file_type,
-        },
-    )
-    if entry["duplicate"]:
-        return False, f"**{name}** is already in the vault (skipped duplicate)."
-
-    # ── Persist to timesheet + ledger, or ledger only ─────────────────────
-    if ts_df is not None and not ts_df.empty:
-        # Remove any pre-existing rows from this source to avoid duplicates
-        st.session_state.timesheet = st.session_state.timesheet[
-            st.session_state.timesheet["date"].astype(str) + st.session_state.timesheet["project"].astype(str)
-            != "SENTINEL_NEVER_MATCHES"
-        ]
-        # Append new timesheet rows
-        existing_ts = st.session_state.timesheet
-        # Deduplicate by (date, project, hours) against existing entries
-        if not existing_ts.empty:
-            existing_keys = set(
-                zip(existing_ts["date"].astype(str),
-                    existing_ts["project"].astype(str),
-                    existing_ts["hours"].astype(str))
-            )
-            ts_df = ts_df[
-                ~ts_df.apply(
-                    lambda r: (str(r["date"]), str(r["project"]), str(r["hours"])) in existing_keys,
-                    axis=1,
-                )
-            ]
-        if not ts_df.empty:
-            st.session_state.timesheet = pd.concat(
-                [st.session_state.timesheet, ts_df], ignore_index=True
-            )
-        _flush_timesheet()
-
-        # Mirror as ledger income entries
-        ledger_rows = timesheet_rows_to_ledger(ts_df, name)
-        append_transactions(ledger_rows)
-        _flush_ledger()
-    else:
-        append_transactions(parsed.transactions)
-        _flush_ledger()
-
-    return True, summary
-
-
-# ---------------------------------------------------------------------------
-# Financial calculations
-# ---------------------------------------------------------------------------
-
-
-def financial_summary(ledger: pd.DataFrame, tax_rate: float) -> dict[str, Any]:
-    if ledger.empty:
-        return {
-            "income": 0.0, "expenses": 0.0, "profit": 0.0,
-            "tax_reserve": 0.0, "transactions": 0,
-            "top_expenses": pd.DataFrame(columns=["category", "amount"]),
-        }
-    income = float(ledger.loc[ledger["kind"] == "income", "amount"].sum())
-    expenses = float(ledger.loc[ledger["kind"] == "expense", "amount"].abs().sum())
-    profit = income - expenses
-    top_expenses = (
-        ledger.loc[ledger["kind"] == "expense"]
-        .assign(amount=lambda f: f["amount"].abs())
-        .groupby("category", dropna=False)["amount"].sum()
-        .sort_values(ascending=False).head(8).reset_index()
-    )
-    return {
-        "income": income, "expenses": expenses, "profit": profit,
-        "tax_reserve": max(profit, 0.0) * tax_rate,
-        "transactions": len(ledger), "top_expenses": top_expenses,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Agent / chat
-# ---------------------------------------------------------------------------
-
-
-def build_context(tax_rate: float, business_type: str, tax_notes: str) -> str:
-    summary = financial_summary(st.session_state.ledger, tax_rate)
-    top_expense_text = (
-        summary["top_expenses"].to_string(index=False, formatters={"amount": "${:,.2f}".format})
-        if not summary["top_expenses"].empty else "No expenses loaded."
-    )
-    docs_list = get_bridge().list_documents()
-    docs_text = (
-        "\n".join(f"- {d['original_name']}: {d['summary']}" for d in docs_list)
-        or "No documents uploaded."
-    )
-    recent = (
-        st.session_state.ledger.tail(12).to_string(index=False)
-        if not st.session_state.ledger.empty else "No transactions."
-    )
-    return (
-        f"Business type: {business_type or 'Not specified'}\n"
-        f"Tax notes: {tax_notes or 'None'}\n"
-        f"Tax reserve rate: {tax_rate:.0%}\n"
-        f"Transactions: {summary['transactions']}\n"
-        f"Income: ${summary['income']:,.2f}\n"
-        f"Expenses: ${summary['expenses']:,.2f}\n"
-        f"Net profit: ${summary['profit']:,.2f}\n"
-        f"Suggested tax reserve: ${summary['tax_reserve']:,.2f}\n\n"
-        f"Top expenses:\n{top_expense_text}\n\n"
-        f"Document vault ({len(docs_list)} files):\n{docs_text}\n\n"
-        f"Recent transactions:\n{recent}"
-    )
-
-
-def fallback_response(prompt: str, context: str, tax_rate: float) -> str:
-    summary = financial_summary(st.session_state.ledger, tax_rate)
-    p = prompt.lower()
-    if any(w in p for w in ("tax", "reserve", "set aside", "owe")):
-        if summary["profit"] > 0:
-            return (
-                f"Based on your profile, net profit is **${summary['profit']:,.2f}**. "
-                f"At {tax_rate:.0%}, I recommend reserving **${summary['tax_reserve']:,.2f}** for taxes. "
-                "This is planning guidance — consult a tax professional for formal advice."
-            )
-        return "No positive profit loaded. Upload income records to calculate a tax reserve."
-    if any(w in p for w in ("income", "revenue", "earn")):
-        return f"Total income: **${summary['income']:,.2f}** across {summary['transactions']} transactions."
-    if any(w in p for w in ("expense", "spend", "cost", "burn")):
-        top = summary["top_expenses"]
-        if top.empty:
-            return "No expense transactions loaded."
-        top_text = "\n".join(f"- **{r['category']}**: ${r['amount']:,.2f}" for _, r in top.iterrows())
-        return f"Total expenses: **${summary['expenses']:,.2f}**.\n\nLargest categories:\n{top_text}"
-    if any(w in p for w in ("profit", "net", "margin")):
-        return (
-            f"Net profit: **${summary['profit']:,.2f}**. "
-            f"Income: ${summary['income']:,.2f} | Expenses: ${summary['expenses']:,.2f}."
-        )
-    docs = get_bridge().list_documents()
-    if any(w in p for w in ("upload", "document", "file", "vault")):
-        if not docs:
-            return "No documents in the vault. Upload CSV or PDF files from the Dashboard."
-        doc_list = "\n".join(f"- **{d['original_name']}**: {d['summary']}" for d in docs)
-        return f"Vault contains {len(docs)} file(s):\n\n{doc_list}"
-    return (
-        f"Profile: **${summary['income']:,.2f}** income, **${summary['expenses']:,.2f}** expenses, "
-        f"**${summary['profit']:,.2f}** net profit, **{len(docs)}** vaulted documents. "
-        "Ask me about taxes, expenses, income, or uploaded files."
-    )
-
-
-def get_openai_key() -> str | None:
-    key = None
-    try:
-        key = st.secrets.get("OPENAI_API_KEY")  # type: ignore[union-attr]
-    except Exception:
-        pass
-    return key or os.getenv("OPENAI_API_KEY")
-
-
-def generate_agent_response(prompt: str, tax_rate: float, business_type: str, tax_notes: str) -> str:
-    context = build_context(tax_rate, business_type, tax_notes)
-    api_key = get_openai_key()
-    if not api_key:
-        return fallback_response(prompt, context, tax_rate)
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        conversation = st.session_state.messages[-10:]
-        if not conversation or conversation[-1].get("content") != prompt:
-            conversation = [*conversation, {"role": "user", "content": prompt}]
-        response = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": (
-                    "You are Phreedom, a careful personal financial agent. "
-                    "Use only the provided financial context. Be specific with calculations."
-                )},
-                {"role": "system", "content": f"Financial memory:\n{context}"},
-                *conversation,
-            ],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content or fallback_response(prompt, context, tax_rate)
-    except Exception as exc:
-        return f"{fallback_response(prompt, context, tax_rate)}\n\n*(OpenAI unavailable: {exc})*"
-
-
-# ---------------------------------------------------------------------------
-# Timesheet calculations
+# Timesheet calculations (kept in app.py — UI-only, no agent needed)
 # ---------------------------------------------------------------------------
 
 
@@ -688,15 +189,20 @@ def add_timesheet_entry(entry_date: date, project: str, hours: float, rate: floa
           "rate": rate, "total_pay": total_pay}],
         columns=TIMESHEET_COLUMNS,
     )
-    st.session_state.timesheet = pd.concat([st.session_state.timesheet, ts_row], ignore_index=True)
+    st.session_state.timesheet = pd.concat(
+        [st.session_state.timesheet, ts_row], ignore_index=True
+    )
     _flush_timesheet()
 
     ledger_row = pd.DataFrame(
         [{"date": entry_date, "description": f"Timesheet earnings: {project_name}",
-          "amount": total_pay, "kind": "income", "category": "Billable income", "source": "Timesheet"}],
+          "amount": total_pay, "kind": "income", "category": "Billable income",
+          "source": "Timesheet"}],
         columns=LEDGER_COLUMNS,
     )
-    append_transactions(ledger_row)
+    st.session_state.ledger = pd.concat(
+        [st.session_state.ledger, ledger_row[LEDGER_COLUMNS]], ignore_index=True
+    )
     _flush_ledger()
 
 
@@ -943,7 +449,7 @@ def render_nav() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Profile controls (saves profile to manifest on submit)
+# Profile controls
 # ---------------------------------------------------------------------------
 
 
@@ -1000,7 +506,6 @@ def render_profile_controls() -> tuple[str, float, str]:
         if clear_clicked:
             bridge = get_bridge()
             bridge.purge_all()
-            # Re-initialise session state from the freshly wiped storage
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             _status("All financial data cleared from disk and session.")
@@ -1021,11 +526,11 @@ def render_profile_controls() -> tuple[str, float, str]:
 def render_permanent_registry() -> None:
     """Display and manage all files stored in the secure vault."""
     bridge = get_bridge()
+    orchestrator = _get_orchestrator()
 
     # ── Handle pending actions (must run before render) ─────────────────
     if "_vault_delete" in st.session_state:
         file_hash = st.session_state.pop("_vault_delete")
-        # Find original name to remove matching ledger rows
         docs = bridge.list_documents()
         orig_name = next((d["original_name"] for d in docs if d["hash"] == file_hash), None)
         bridge.delete_document(file_hash)
@@ -1034,7 +539,7 @@ def render_permanent_registry() -> None:
                 st.session_state.ledger["source"] != orig_name
             ]
             _flush_ledger()
-        _status(f"Document deleted from vault.")
+        _status("Document deleted from vault.")
         st.rerun()
 
     if "_vault_reanalyze" in st.session_state:
@@ -1044,24 +549,10 @@ def render_permanent_registry() -> None:
         entry = next((d for d in docs if d["hash"] == file_hash), None)
         if content and entry:
             orig_name = entry["original_name"]
-            # Remove old rows for this source
-            st.session_state.ledger = st.session_state.ledger[
-                st.session_state.ledger["source"] != orig_name
-            ]
-            # Re-parse from vault bytes
-            if orig_name.lower().endswith(".csv"):
-                parsed = normalize_csv(orig_name, content)
-            else:
-                text = extract_pdf_text(content)
-                tx_df = parse_pdf_transactions(orig_name, text)
-                summary = summarize_pdf(orig_name, text, tx_df)
-                parsed = ParsedDocument(orig_name, tx_df, summary)
-            append_transactions(parsed.transactions)
-            _flush_ledger()
-            bridge.update_document_metadata(file_hash, {
-                "transaction_count": len(parsed.transactions),
-                "summary": parsed.summary,
-            })
+            result = orchestrator.handle_reparse(
+                orig_name, content, st.session_state.ledger
+            )
+            st.session_state.ledger = result["ledger"]
             _status(f"Re-analysed {orig_name}.")
         st.rerun()
 
@@ -1101,10 +592,7 @@ def render_permanent_registry() -> None:
             else '<span class="nd-badge nd-badge-warn">File missing</span>'
         )
 
-        with st.expander(
-            f"**{name}** — {rows_label}",
-            expanded=False,
-        ):
+        with st.expander(f"**{name}** — {rows_label}", expanded=False):
             st.markdown(
                 f'<div class="nd-registry-meta">'
                 f"{badge_html}&nbsp;&nbsp;"
@@ -1137,7 +625,6 @@ def render_permanent_registry() -> None:
                     st.session_state["_vault_delete"] = entry["hash"]
                     st.rerun()
 
-    # ── Vault diagnostics in expander ────────────────────────────────────
     with st.expander("Vault diagnostics", expanded=False):
         diag_rows = [
             ["Backend", diag["backend"].upper()],
@@ -1161,23 +648,20 @@ def render_permanent_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
+def render_dashboard(tax_rate: float) -> None:
+    from agents.tax_engine import TaxEngine
 
-    # ── Headline metrics ─────────────────────────────────────────────────
+    summary = TaxEngine().compute_summary(st.session_state.ledger, tax_rate)
+
     _section("Financial overview", "Snapshot")
     _divider_space(0.25)
     _, c1, c2, c3, c4, _ = st.columns([0.04, 1, 1, 1, 1, 0.04], gap="large")
-    with c1:
-        _kpi("Income", format_usd(summary["income"]))
-    with c2:
-        _kpi("Expenses", format_usd(summary["expenses"]))
-    with c3:
-        _kpi("Net profit", format_usd(summary["profit"]), summary["profit"])
-    with c4:
-        _kpi("Tax reserve", format_usd(summary["tax_reserve"]))
+    with c1: _kpi("Income", format_usd(summary.income))
+    with c2: _kpi("Expenses", format_usd(summary.expenses))
+    with c3: _kpi("Net profit", format_usd(summary.profit), summary.profit)
+    with c4: _kpi("Tax reserve", format_usd(summary.tax_reserve))
     _divider_space(0.5)
 
-    # ── Upload & ingestion ───────────────────────────────────────────────
     _section(
         "Upload documents",
         "Intake",
@@ -1193,13 +677,17 @@ def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
             help="CSV bank exports are parsed into transactions. PDFs are text-extracted.",
         )
         if uploaded:
+            orchestrator = _get_orchestrator()
             for f in uploaded:
                 with st.spinner(f"Vaulting {f.name}…"):
-                    was_new, msg = ingest_to_vault(f)
-                if was_new:
-                    st.success(msg)
+                    result = orchestrator.handle_upload(
+                        f.name, f.getvalue(), st.session_state.ledger
+                    )
+                if result["was_new"]:
+                    st.session_state.ledger = result["ledger"]
+                    st.success(result["message"])
                 else:
-                    st.info(msg)
+                    st.info(result["message"])
 
         with st.expander("Ingestion standards", expanded=False):
             st.markdown(
@@ -1211,18 +699,16 @@ def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
                 """
             )
 
-    # ── Permanent registry ───────────────────────────────────────────────
     render_permanent_registry()
 
-    # ── Tax savings ──────────────────────────────────────────────────────
     _section("Tax savings", "Planning")
-    if summary["profit"] > 0:
+    if summary.profit > 0:
         _, tax_col, _ = st.columns([0.04, 0.5, 0.46])
         with tax_col:
-            _kpi("Suggested tax reserve", format_usd(summary["tax_reserve"]))
+            _kpi("Suggested tax reserve", format_usd(summary.tax_reserve))
         st.markdown(
-            f"<p class='nd-note'>Set aside <strong>{format_usd(summary['tax_reserve'])}</strong> "
-            f"from net profit of <strong>{format_usd(summary['profit'])}</strong> "
+            f"<p class='nd-note'>Set aside <strong>{format_usd(summary.tax_reserve)}</strong> "
+            f"from net profit of <strong>{format_usd(summary.profit)}</strong> "
             f"at your {tax_rate:.0%} reserve rate.</p>",
             unsafe_allow_html=True,
         )
@@ -1230,15 +716,14 @@ def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
         st.info("No positive net profit loaded. Upload income records or add timesheet entries.")
     st.caption("Planning guidance only — not formal tax, legal, or accounting advice.")
 
-    # ── Full ledger (collapsed by default) ──────────────────────────────
     with st.expander("📋  Full transaction ledger", expanded=False):
         if st.session_state.ledger.empty:
             st.info("Upload a CSV/PDF or add timesheet entries to build your ledger.")
         else:
             st.dataframe(st.session_state.ledger, use_container_width=True, hide_index=True)
-            if not summary["top_expenses"].empty:
+            if not summary.top_expenses.empty:
                 st.markdown("**Largest expense categories**")
-                st.bar_chart(summary["top_expenses"].set_index("category"))
+                st.bar_chart(summary.top_expenses.set_index("category"))
             st.download_button(
                 "Download ledger CSV",
                 st.session_state.ledger.to_csv(index=False).encode(),
@@ -1252,7 +737,9 @@ def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_timesheet_table(df: pd.DataFrame, key: str, download_label: str, download_fname: str) -> None:
+def _render_timesheet_table(
+    df: pd.DataFrame, key: str, download_label: str, download_fname: str
+) -> None:
     """Render a clean TIMESHEET_COLUMNS DataFrame with formatting and download."""
     if df.empty:
         return
@@ -1303,10 +790,12 @@ def render_timesheet(tax_rate: float) -> None:
 
         # Stage bytes + preview when a new file is attached
         if ts_upload is not None:
+            from agents.ingestion_worker import parse_timesheet_csv as _parse_ts_csv
             file_key = f"{ts_upload.name}:{ts_upload.size}"
             staged = st.session_state.ts_staged_file
             if staged is None or staged.get("key") != file_key:
                 content = ts_upload.getvalue()
+                preview_df, preview_summary = _parse_ts_csv(ts_upload.name, content)
                 preview_df, preview_summary = parse_timesheet_csv(ts_upload.name, content)
                 st.session_state.ts_staged_file = {
                     "key": file_key,
@@ -1353,6 +842,43 @@ def render_timesheet(tax_rate: float) -> None:
                         use_container_width=True,
                         help="Save these entries to the permanent vault and timesheet.",
                     ):
+                        orchestrator = _get_orchestrator()
+                        with st.spinner("Saving to vault…"):
+                            result = orchestrator.handle_upload(
+                                staged["name"], staged["content"], st.session_state.ledger
+                            )
+                        st.session_state.ts_staged_file = None
+                        st.session_state.ts_uploader_rev += 1
+                        if result["was_new"]:
+                            st.session_state.ledger = result["ledger"]
+                            if result.get("is_timesheet") and result.get("timesheet") is not None:
+                                new_ts = result["timesheet"]
+                                existing_ts = st.session_state.timesheet
+                                if not existing_ts.empty:
+                                    existing_keys = set(
+                                        zip(
+                                            existing_ts["date"].astype(str),
+                                            existing_ts["project"].astype(str),
+                                            existing_ts["hours"].astype(str),
+                                        )
+                                    )
+                                    new_ts = new_ts[
+                                        ~new_ts.apply(
+                                            lambda r: (
+                                                str(r["date"]), str(r["project"]), str(r["hours"])
+                                            ) in existing_keys,
+                                            axis=1,
+                                        )
+                                    ]
+                                if not new_ts.empty:
+                                    st.session_state.timesheet = pd.concat(
+                                        [st.session_state.timesheet, new_ts], ignore_index=True
+                                    )
+                                    _flush_timesheet()
+                            st.success(result["message"])
+                            _status(f"Timesheet submitted: {result['message']}")
+                        else:
+                            st.info(result["message"])
                         class _StagedUpload:
                             def __init__(self, n, c):
                                 self.name = n
@@ -1472,10 +998,10 @@ absent the row is stored with `$0.00` pay.
     _divider_space(0.5)
 
     _, s1, s2, s3, s4, _ = st.columns([0.03, 1, 1, 1, 1, 0.03], gap="large")
-    with s1: _kpi("Hours Ahead/Behind",    f"{dash['hours_gap']:+,.2f}", dash["hours_gap"])
-    with s2: _kpi("Earnings vs Pace",      format_usd(dash["earnings_to_date_gap"]), dash["earnings_to_date_gap"])
-    with s3: _kpi("vs Base Rate",          format_usd(dash["earnings_vs_base_rate"]), dash["earnings_vs_base_rate"])
-    with s4: _kpi("Prev Month Hrs Delta",  f"{dash['prev_month_hours_gap']:+,.2f}", dash["prev_month_hours_gap"])
+    with s1: _kpi("Hours Ahead/Behind",   f"{dash['hours_gap']:+,.2f}", dash["hours_gap"])
+    with s2: _kpi("Earnings vs Pace",     format_usd(dash["earnings_to_date_gap"]), dash["earnings_to_date_gap"])
+    with s3: _kpi("vs Base Rate",         format_usd(dash["earnings_vs_base_rate"]), dash["earnings_vs_base_rate"])
+    with s4: _kpi("Prev Month Hrs Delta", f"{dash['prev_month_hours_gap']:+,.2f}", dash["prev_month_hours_gap"])
 
     _divider_space(0.5)
 
@@ -1535,9 +1061,9 @@ absent the row is stored with `$0.00` pay.
     current_entries = dash["current_month_entries"].copy()
 
     _, sm1, sm2, sm3, _ = st.columns([0.04, 1, 1, 1, 0.04], gap="large")
-    with sm1: _kpi("Total hours",        f"{dash['actual_hours']:,.2f}")
-    with sm2: _kpi("Avg billable rate",  format_usd(dash["avg_rate"]))
-    with sm3: _kpi("Total pay",          format_usd(dash["actual_pay"]))
+    with sm1: _kpi("Total hours",       f"{dash['actual_hours']:,.2f}")
+    with sm2: _kpi("Avg billable rate", format_usd(dash["avg_rate"]))
+    with sm3: _kpi("Total pay",         format_usd(dash["actual_pay"]))
 
     _divider_space(0.5)
 
@@ -1563,7 +1089,6 @@ absent the row is stored with `$0.00` pay.
         _section("Full timesheet history", "All entries",
                  f"{len(all_entries)} total entries across all periods — persisted to disk.")
 
-        # Month filter
         all_entries_dated = all_entries.copy()
         all_entries_dated["_ym"] = pd.to_datetime(
             all_entries_dated["date"], errors="coerce"
@@ -1591,7 +1116,6 @@ absent the row is stored with `$0.00` pay.
         else:
             display_df = all_entries.copy()
 
-        # Project search
         _, search_col, _, _ = st.columns([0.04, 0.45, 0.47, 0.04])
         with search_col:
             search_term = st.text_input(
@@ -1615,7 +1139,6 @@ absent the row is stored with `$0.00` pay.
                     download_label="Download filtered view",
                     download_fname=f"timesheet-history-{date.today()}.csv",
                 )
-                # Summary row
                 total_h = float(display_df["hours"].sum())
                 total_p = float(display_df["total_pay"].sum())
                 avg_r   = total_p / total_h if total_h else 0.0
@@ -1666,7 +1189,17 @@ def render_chat_page(tax_rate: float, business_type: str, tax_notes: str) -> Non
 
     with st.chat_message("assistant"):
         with st.spinner("Reviewing your financial profile…"):
-            answer = generate_agent_response(prompt, tax_rate, business_type, tax_notes)
+            orchestrator = _get_orchestrator()
+            answer = orchestrator.handle_chat(
+                prompt=prompt,
+                conversation=st.session_state.messages[:-1],
+                profile={
+                    "tax_rate": tax_rate,
+                    "business_type": business_type,
+                    "tax_notes": tax_notes,
+                },
+                ledger=st.session_state.ledger,
+            )
         st.markdown(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -1690,10 +1223,9 @@ def main() -> None:
 
     active_page = render_nav()
     business_type, tax_rate, tax_notes = render_profile_controls()
-    summary = financial_summary(st.session_state.ledger, tax_rate)
 
     if active_page == "Dashboard":
-        render_dashboard(summary, tax_rate)
+        render_dashboard(tax_rate)
     elif active_page == "Timesheet":
         render_timesheet(tax_rate)
     elif active_page == "Chat":
