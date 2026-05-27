@@ -888,7 +888,6 @@ def render_timesheet(tax_rate: float) -> None:
             if staged is None or staged.get("key") != file_key:
                 content = ts_upload.getvalue()
                 preview_df, preview_summary = _parse_ts_csv(ts_upload.name, content)
-                preview_df, preview_summary = parse_timesheet_csv(ts_upload.name, content)
                 st.session_state.ts_staged_file = {
                     "key": file_key,
                     "name": ts_upload.name,
@@ -971,24 +970,6 @@ def render_timesheet(tax_rate: float) -> None:
                             _status(f"Timesheet submitted: {result['message']}")
                         else:
                             st.info(result["message"])
-                        class _StagedUpload:
-                            def __init__(self, n, c):
-                                self.name = n
-                                self._c = c
-                            def getvalue(self):
-                                return self._c
-
-                        with st.spinner("Saving to vault…"):
-                            was_new, msg = ingest_to_vault(
-                                _StagedUpload(staged["name"], staged["content"])
-                            )
-                        st.session_state.ts_staged_file = None
-                        st.session_state.ts_uploader_rev += 1
-                        if was_new:
-                            st.success(msg)
-                            _status(f"Timesheet submitted: {msg}")
-                        else:
-                            st.info(msg)
                         st.rerun()
 
                 with cancel_c:
