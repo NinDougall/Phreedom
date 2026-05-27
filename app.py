@@ -928,7 +928,6 @@ def render_spending_dashboard(ledger: pd.DataFrame) -> None:
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
-def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
 def render_dashboard(tax_rate: float) -> None:
     from agents.tax_engine import TaxEngine
 
