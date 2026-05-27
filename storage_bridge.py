@@ -344,6 +344,35 @@ class StorageBridge:
     def fetch_tax_categories(self) -> list[str]:
         return list(self._read_manifest().get("tax_categories", _DEFAULT_MANIFEST["tax_categories"]))
 
+    def add_tax_category(self, category: str) -> tuple[bool, str]:
+        """Append a custom category to the manifest's tax_categories pre-sets list."""
+        category = category.strip()
+        if not category:
+            return False, "Category name cannot be empty."
+        manifest = self._read_manifest()
+        categories = manifest.setdefault("tax_categories", list(_DEFAULT_MANIFEST["tax_categories"]))
+        
+        # Exact match or case-insensitive duplicate check
+        if any(cat.lower() == category.lower() for cat in categories):
+            return False, f"Category '{category}' already exists."
+        
+        categories.append(category)
+        self._write_manifest(manifest)
+        return True, f"Category '{category}' added successfully."
+
+    def delete_tax_category(self, category: str) -> tuple[bool, str]:
+        """Delete a custom category from the manifest pre-sets list (preserves default categories)."""
+        category = category.strip()
+        if category in _DEFAULT_MANIFEST["tax_categories"]:
+            return False, f"Default category '{category}' cannot be deleted."
+        manifest = self._read_manifest()
+        categories = manifest.get("tax_categories", [])
+        if category not in categories:
+            return False, f"Category '{category}' not found."
+        categories.remove(category)
+        self._write_manifest(manifest)
+        return True, f"Category '{category}' deleted successfully."
+
     # ── Ledger ────────────────────────────────────────────────────────────
 
     def fetch_ledger(self) -> pd.DataFrame:
