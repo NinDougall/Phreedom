@@ -28,6 +28,112 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import secrets
+
+
+# ---------------------------------------------------------------------------
+# Password hashing and AuthStore
+# ---------------------------------------------------------------------------
+
+def hash_password(password: str) -> str:
+    """Hash a password using PBKDF2 with SHA-256 and a random salt."""
+    salt = secrets.token_hex(16)
+    iterations = 100_000
+    hashed = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${hashed}"
+
+
+def verify_password(password: str, hashed_ref: str) -> bool:
+    """Verify a password against a hashed reference string."""
+    try:
+        parts = hashed_ref.split("$")
+        if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+            return False
+        iterations = int(parts[1])
+        salt = parts[2]
+        hashed = parts[3]
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return secrets.compare_digest(candidate, hashed)
+    except Exception:
+        return False
+
+
+class AuthStore:
+    """Credentials and profile directory manager for multi-user authentication."""
+
+    def __init__(self, base_dir: Path | str = ".ndeavour_profile") -> None:
+        self._base = Path(base_dir).resolve()
+        self._users_file = self._base / "users.json"
+        self._ensure_base()
+
+    def _ensure_base(self) -> None:
+        self._base.mkdir(parents=True, exist_ok=True)
+        if not self._users_file.exists():
+            self._users_file.write_text(json.dumps({}, indent=2), encoding="utf-8")
+
+    def _read_users(self) -> dict[str, dict[str, Any]]:
+        try:
+            return json.loads(self._users_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _write_users(self, users: dict[str, dict[str, Any]]) -> None:
+        self._users_file.write_text(json.dumps(users, indent=2), encoding="utf-8")
+
+    def register(self, username: str, password: str) -> tuple[bool, str]:
+        """Register a new user.
+
+        Usernames must be 3-20 characters and alphanumeric/underscore.
+        """
+        username = username.strip()
+        if not re.match(r"^[a-zA-Z0-9_]{3,20}$", username):
+            return False, "Username must be 3-20 characters and only contain letters, numbers, and underscores."
+
+        if len(password) < 6:
+            return False, "Password must be at least 6 characters long."
+
+        users = self._read_users()
+        username_lower = username.lower()
+        if username_lower in {u.lower() for u in users}:
+            return False, f"Username '{username}' is already taken."
+
+        users[username] = {
+            "password_hash": hash_password(password),
+            "created_at": datetime.now().isoformat(),
+        }
+        self._write_users(users)
+        return True, "Registration successful."
+
+    def authenticate(self, username: str, password: str) -> tuple[bool, str]:
+        """Authenticate a user and return username with casing preserved."""
+        username = username.strip()
+        users = self._read_users()
+        
+        username_lower = username.lower()
+        matched_username = None
+        for u in users:
+            if u.lower() == username_lower:
+                matched_username = u
+                break
+
+        if not matched_username:
+            return False, "Invalid username or password."
+
+        user_data = users[matched_username]
+        if verify_password(password, user_data["password_hash"]):
+            return True, matched_username
+        
+        return False, "Invalid username or password."
 
 
 # ---------------------------------------------------------------------------
@@ -342,11 +448,18 @@ _bridge: StorageBridge | None = None
 
 
 def get_bridge(base_dir: str = ".ndeavour_profile") -> StorageBridge:
-    """Return the process-level StorageBridge singleton.
+    """Return the process-level StorageBridge singleton or a session-level instance.
 
     Calling ``get_bridge()`` multiple times always returns the same instance.
     Pass ``base_dir`` only on first call (subsequent calls ignore it).
     """
+    try:
+        import streamlit as st
+        if "storage_bridge" in st.session_state:
+            return st.session_state.storage_bridge
+    except Exception:
+        pass
+
     global _bridge
     if _bridge is None:
         _bridge = StorageBridge(base_dir)
