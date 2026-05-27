@@ -39,6 +39,101 @@ LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
 APP_PAGES = ["Dashboard", "Timesheet", "Chat"]
 
+CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
+DATE_RE = re.compile(
+    r"(?P<date>\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b)"
+)
+
+# Credit card statement detection signals
+_CC_DATE_HINTS = ("transaction date", "trans date", "post date", "posted date",
+                  "posting date", "transaction_date", "posted_date")
+_CC_DESC_HINTS = ("description", "merchant", "payee", "trans description",
+                  "transaction description")
+_CC_PAYMENT_KW = ("payment", "autopay", "auto pay", "epay", "online pmt",
+                  "online payment", "bill pay", "thank you", "min payment",
+                  "minimum payment", "mobile payment", "check payment")
+
+# Keyword → spending category map (longest / most specific match wins via order)
+CC_SPEND_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "Restaurants & Dining": (
+        "restaurant", "cafe", "coffee", "pizza", "burger", "sushi", "diner",
+        "mcdonald", "starbucks", "dunkin", "chipotle", "grubhub", "doordash",
+        "ubereats", "seamless", "panera", "subway", "kfc", "taco bell", "wendy",
+        "chick-fil", "noodles", "panda express", "domino", "five guys", "shake shack",
+        "cheesecake factory", "olive garden", "applebee", "denny", "ihop", "waffle house",
+    ),
+    "Groceries": (
+        "grocery", "supermarket", "trader joe", "whole foods", "kroger", "safeway",
+        "publix", "costco", "aldi", "shoprite", "stop & shop", "wegmans", "food mart",
+        "market basket", "sprouts", "harris teeter", "h-e-b", "meijer", "smart & final",
+    ),
+    "Gas & Auto": (
+        "shell", "exxon", "chevron", "bp oil", "mobil", "sunoco", "marathon",
+        "casey's", "speedway", "circle k", "wawa", "gas station", "fuel",
+        "parking", "car wash", "jiffy lube", "autozone", "napa auto", "o'reilly auto",
+        "advance auto", "pep boys", "midas", "firestone", "valvoline",
+    ),
+    "Travel & Transport": (
+        "delta", "united airline", "american airline", "southwest", "jetblue",
+        "spirit air", "frontier air", "alaska air", "lufthansa", "british airways",
+        "hotel", "marriott", "hilton", "hyatt", "airbnb", "vrbo", "expedia",
+        "booking.com", "priceline", "kayak", "uber", "lyft", "taxi", "transit",
+        "amtrak", "enterprise rent", "hertz", "avis", "budget car",
+    ),
+    "Shopping": (
+        "amazon", "ebay", "etsy", "target", "walmart", "macy", "nordstrom",
+        "gap store", "old navy", "zara", "h&m", "best buy", "apple store",
+        "nike", "adidas", "tj maxx", "marshalls", "ross store", "home depot",
+        "lowe's", "ikea", "wayfair", "bed bath", "container store", "dollar tree",
+    ),
+    "Entertainment": (
+        "netflix", "hulu", "spotify", "apple music", "disney+", "hbo max",
+        "paramount+", "peacock", "cinema", "amc theater", "regal cinema",
+        "ticketmaster", "stubhub", "concert", "arcade", "bowling", "playstation",
+        "xbox", "steam games", "twitch", "youtube premium",
+    ),
+    "Health & Medical": (
+        "pharmacy", "cvs", "walgreens", "rite aid", "hospital", "urgent care",
+        "doctor", "dental", "dentist", "orthodontist", "optometrist", "vision",
+        "gym", "planet fitness", "equinox", "24 hour fitness", "la fitness",
+        "anytime fitness", "orange theory", "crossfit", "medical",
+    ),
+    "Utilities & Bills": (
+        "electric", "water bill", "sewer", "internet", "comcast", "spectrum",
+        "xfinity", "at&t bill", "verizon bill", "t-mobile", "sprint",
+        "insurance", "geico", "progressive", "allstate", "state farm",
+    ),
+    "Software & Subscriptions": (
+        "adobe", "microsoft", "google", "dropbox", "zoom", "slack", "github",
+        "aws", "digitalocean", "openai", "figma", "notion", "linear",
+        "1password", "cloudflare", "heroku", "vercel", "render", "twilio",
+        "sendgrid", "mailchimp", "hubspot", "salesforce",
+    ),
+    "Office & Business": (
+        "office depot", "staples", "fedex", "ups store", "usps", "postage",
+        "shipping", "printing", "business supply",
+    ),
+    "Bank & Card Fees": (
+        "annual fee", "late fee", "foreign transaction", "atm fee",
+        "service charge", "wire fee", "overdraft", "returned payment",
+        "interest charge", "cash advance fee",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ParsedDocument:
+    source: str
+    transactions: pd.DataFrame
+    summary: str
+
 
 # ---------------------------------------------------------------------------
 # Session state — loaded from disk on cold start
@@ -740,6 +835,100 @@ def render_permanent_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
+
+def spending_summary(ledger: pd.DataFrame) -> pd.DataFrame:
+    """Return expense totals grouped by category, descending by amount."""
+    if ledger.empty:
+        return pd.DataFrame(columns=["category", "amount", "pct", "tx_count"])
+    expenses = ledger.loc[ledger["kind"] == "expense"].copy()
+    if expenses.empty:
+        return pd.DataFrame(columns=["category", "amount", "pct", "tx_count"])
+    grouped = (
+        expenses
+        .assign(amount=lambda f: f["amount"].abs())
+        .groupby("category", dropna=False)
+        .agg(amount=("amount", "sum"), tx_count=("amount", "count"))
+        .sort_values("amount", ascending=False)
+        .reset_index()
+    )
+    total = grouped["amount"].sum()
+    grouped["pct"] = (grouped["amount"] / total * 100).round(1) if total else 0.0
+    return grouped
+
+
+def render_spending_dashboard(ledger: pd.DataFrame) -> None:
+    """Spending category breakdown — only shown when expense data exists."""
+    df = spending_summary(ledger)
+    if df.empty:
+        return
+
+    total_spend = float(df["amount"].sum())
+    top = df.head(8)
+
+    _section(
+        "Spending breakdown",
+        "Categories",
+        f"Auto-categorised from transaction descriptions. "
+        f"Total: {format_usd(total_spend)} across {int(df['tx_count'].sum())} expense rows.",
+    )
+
+    # ── Top-4 KPI tiles ───────────────────────────────────────────────────
+    top4 = top.head(4)
+    _, *kpi_cols, _ = st.columns([0.04] + [1] * len(top4) + [0.04], gap="large")
+    for col, (_, row) in zip(kpi_cols, top4.iterrows()):
+        with col:
+            _kpi(row["category"], format_usd(row["amount"]))
+    _divider_space(0.5)
+
+    # ── Chart + table side by side ────────────────────────────────────────
+    _, chart_col, table_col, _ = st.columns([0.04, 0.5, 0.42, 0.04], gap="large")
+
+    with chart_col:
+        bar = (
+            alt.Chart(top)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+            .encode(
+                x=alt.X(
+                    "amount:Q",
+                    title="USD spent",
+                    axis=alt.Axis(labelColor="#C4B8DF", format="$,.0f"),
+                ),
+                y=alt.Y(
+                    "category:N",
+                    sort="-x",
+                    title=None,
+                    axis=alt.Axis(labelColor="#C4B8DF"),
+                ),
+                color=alt.Color(
+                    "amount:Q",
+                    scale=alt.Scale(scheme="purples"),
+                    legend=None,
+                ),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("amount:Q",   title="Total",  format="$,.2f"),
+                    alt.Tooltip("tx_count:Q", title="Transactions"),
+                    alt.Tooltip("pct:Q",      title="% of spend", format=".1f"),
+                ],
+            )
+            .properties(height=min(280, len(top) * 38), background="transparent")
+            .configure_view(strokeWidth=0)
+            .configure_axis(grid=False, domain=False)
+        )
+        st.altair_chart(bar, use_container_width=True)
+
+    with table_col:
+        disp = df.copy()
+        disp["amount"] = disp["amount"].map(lambda v: f"${v:,.2f}")
+        disp["pct"]    = disp["pct"].map(lambda v: f"{v:.1f}%")
+        disp = disp.rename(columns={
+            "category": "Category", "amount": "Total",
+            "pct": "% of spend", "tx_count": "Transactions",
+        })
+        st.dataframe(disp, use_container_width=True, hide_index=True)
+
+
+def render_dashboard(summary: dict[str, Any], tax_rate: float) -> None:
 def render_dashboard(tax_rate: float) -> None:
     from agents.tax_engine import TaxEngine
 
@@ -754,6 +943,10 @@ def render_dashboard(tax_rate: float) -> None:
     with c4: _kpi("Tax reserve", format_usd(summary.tax_reserve))
     _divider_space(0.5)
 
+    # ── Spending category breakdown (shown when expense data exists) ─────
+    render_spending_dashboard(st.session_state.ledger)
+
+    # ── Upload & ingestion ───────────────────────────────────────────────
     _section(
         "Upload documents",
         "Intake",
