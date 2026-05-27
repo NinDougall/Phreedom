@@ -55,6 +55,90 @@ _DEFAULT_ASSISTANT_MSG = {
 }
 
 
+def render_auth_flow() -> bool:
+    """Render Login / Registration tabs inside the styled dashboard.
+
+    Returns True if the user is successfully authenticated, False otherwise.
+    """
+    if "authenticated_user" in st.session_state:
+        return True
+
+    from storage_bridge import AuthStore, StorageBridge
+    auth_store = AuthStore()
+
+    # Layout for centering authentication container
+    col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
+    with col2:
+        _divider_space(2.0)
+        st.markdown(
+            f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
+            f'<div><div class="nd-nav-wordmark">N-Deavourservices</div>'
+            f'<div class="nd-nav-tagline">Excellence through efficiency</div></div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div style="text-align: center; color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem;">'
+            'Secure Multi-User Financial Agent Workspace</div>',
+            unsafe_allow_html=True,
+        )
+
+        tab_login, tab_register = st.tabs(["🔑  Log In", "📝  Register"])
+
+        with tab_login:
+            st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+            with st.form("login_form"):
+                username = st.text_input("Username", key="login_username", placeholder="Enter username")
+                password = st.text_input("Password", key="login_password", type="password", placeholder="Enter password")
+                submitted = st.form_submit_button("Log In", use_container_width=True)
+
+                if submitted:
+                    if not username or not password:
+                        st.error("Please fill in all fields.")
+                    else:
+                        success, result_username = auth_store.authenticate(username, password)
+                        if success:
+                            st.session_state.authenticated_user = result_username
+                            # Assign isolated StorageBridge
+                            user_profile_dir = f".ndeavour_profile/users/{result_username}"
+                            st.session_state.storage_bridge = StorageBridge(user_profile_dir)
+                            # Create clean orchestrator for this user
+                            st.session_state.orchestrator = OrchestratorAgent(st.session_state.storage_bridge)
+                            st.success(f"Welcome back, {result_username}!")
+                            _status("Successfully logged in.")
+                            st.rerun()
+                        else:
+                            st.error(result_username)
+
+        with tab_register:
+            st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+            with st.form("register_form"):
+                reg_username = st.text_input("Username", key="reg_username", placeholder="3-20 characters, alphanumeric/underscores")
+                reg_password = st.text_input("Password", key="reg_password", type="password", placeholder="At least 6 characters")
+                reg_confirm = st.text_input("Confirm Password", key="reg_confirm", type="password", placeholder="Repeat password")
+                reg_submitted = st.form_submit_button("Register", use_container_width=True)
+
+                if reg_submitted:
+                    if not reg_username or not reg_password or not reg_confirm:
+                        st.error("Please fill in all fields.")
+                    elif reg_password != reg_confirm:
+                        st.error("Passwords do not match.")
+                    else:
+                        success, message = auth_store.register(reg_username, reg_password)
+                        if success:
+                            # Auto login after successful registration
+                            st.session_state.authenticated_user = reg_username
+                            user_profile_dir = f".ndeavour_profile/users/{reg_username}"
+                            st.session_state.storage_bridge = StorageBridge(user_profile_dir)
+                            st.session_state.orchestrator = OrchestratorAgent(st.session_state.storage_bridge)
+                            st.success("Registration successful! Logging you in...")
+                            _status("Successfully registered and logged in.")
+                            st.rerun()
+                        else:
+                            st.error(message)
+
+    return False
+
+
 def _get_orchestrator() -> OrchestratorAgent:
     """Return the process-level OrchestratorAgent singleton."""
     if "orchestrator" not in st.session_state:
@@ -435,6 +519,14 @@ def render_nav() -> str:
                         st.session_state.active_page = page
                         _status(f"Navigated to {page}.")
                         st.rerun()
+                st.divider()
+                st.markdown(f"Logged in as: **{st.session_state.authenticated_user}**")
+                if st.button("🚪  Log out", key="_nav_logout", use_container_width=True):
+                    # Clear session state for logout
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    _status("Logged out successfully.")
+                    st.rerun()
     with right_col:
         st.markdown(
             f'<p class="nd-nav-page" style="text-align:right;margin:0.4rem 0 0">'
@@ -1218,8 +1310,13 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
-    init_state()
     _inject_styles()
+
+    if not render_auth_flow():
+        _close_main()
+        return
+
+    init_state()
 
     active_page = render_nav()
     business_type, tax_rate, tax_notes = render_profile_controls()
