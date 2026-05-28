@@ -207,7 +207,8 @@ class StorageBridge:
         self._base = Path(base_dir).resolve()
         self._vault = self._base / "secure_vault"
         self._manifest_path = self._base / "profile_manifest.json"
-        self._ledger_path = self._base / "ledger.csv"
+        self._expenses_ledger_path = self._base / "expenses_ledger.csv"
+        self._income_ledger_path = self._base / "income_ledger.csv"
         self._timesheet_path = self._base / "timesheet.csv"
         self._chat_path = self._base / "chat_history.json"
         self._ensure_dirs()
@@ -373,14 +374,14 @@ class StorageBridge:
         self._write_manifest(manifest)
         return True, f"Category '{category}' deleted successfully."
 
-    # ── Ledger ────────────────────────────────────────────────────────────
+    # ── Expenses & Income Ledgers (Independent Separation) ──────────────────
 
-    def fetch_ledger(self) -> pd.DataFrame:
-        """Load the persistent ledger from disk, or return empty DataFrame."""
-        if not self._ledger_path.exists():
+    def fetch_expenses_ledger(self) -> pd.DataFrame:
+        """Load the persistent expenses ledger from disk, containing strictly expenditures."""
+        if not self._expenses_ledger_path.exists():
             return pd.DataFrame(columns=_LEDGER_COLS)
         try:
-            df = pd.read_csv(self._ledger_path, dtype=str)
+            df = pd.read_csv(self._expenses_ledger_path, dtype=str)
             if df.empty:
                 return pd.DataFrame(columns=_LEDGER_COLS)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
@@ -389,12 +390,50 @@ class StorageBridge:
         except Exception:
             return pd.DataFrame(columns=_LEDGER_COLS)
 
-    def save_ledger(self, ledger: pd.DataFrame) -> None:
-        """Write the full ledger to disk atomically."""
+    def save_expenses_ledger(self, ledger: pd.DataFrame) -> None:
+        """Write the expenses ledger to disk atomically."""
         if ledger.empty:
-            self._ledger_path.write_text(",".join(_LEDGER_COLS) + "\n", encoding="utf-8")
+            self._expenses_ledger_path.write_text(",".join(_LEDGER_COLS) + "\n", encoding="utf-8")
         else:
-            ledger.to_csv(self._ledger_path, index=False)
+            ledger.to_csv(self._expenses_ledger_path, index=False)
+
+    def fetch_income_ledger(self) -> pd.DataFrame:
+        """Load the persistent income ledger from disk, containing strictly billing, invoice earnings."""
+        if not self._income_ledger_path.exists():
+            return pd.DataFrame(columns=_LEDGER_COLS)
+        try:
+            df = pd.read_csv(self._income_ledger_path, dtype=str)
+            if df.empty:
+                return pd.DataFrame(columns=_LEDGER_COLS)
+            df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            return df.dropna(subset=["date"])[_LEDGER_COLS]
+        except Exception:
+            return pd.DataFrame(columns=_LEDGER_COLS)
+
+    def save_income_ledger(self, ledger: pd.DataFrame) -> None:
+        """Write the income ledger to disk atomically."""
+        if ledger.empty:
+            self._income_ledger_path.write_text(",".join(_LEDGER_COLS) + "\n", encoding="utf-8")
+        else:
+            ledger.to_csv(self._income_ledger_path, index=False)
+
+    # ── Ledger (Backward Compatibility / Aggregated View) ──────────────────
+
+    def fetch_ledger(self) -> pd.DataFrame:
+        """Combines expenses and income datasets for backward compatible aggregations."""
+        exp = self.fetch_expenses_ledger()
+        inc = self.fetch_income_ledger()
+        if exp.empty and inc.empty:
+            return pd.DataFrame(columns=_LEDGER_COLS)
+        return pd.concat([exp, inc], ignore_index=True)
+
+    def save_ledger(self, ledger: pd.DataFrame) -> None:
+        """Saves segmented ledgers by filtering incoming rows based on standard debit/credit parameters."""
+        exp = ledger[ledger["kind"] == "expense"].copy()
+        inc = ledger[ledger["kind"] == "income"].copy()
+        self.save_expenses_ledger(exp)
+        self.save_income_ledger(inc)
 
     # ── Timesheet ─────────────────────────────────────────────────────────
 
@@ -449,7 +488,8 @@ class StorageBridge:
             "backend": self.BACKEND,
             "profile_dir": str(self._base),
             "manifest_exists": self._manifest_path.exists(),
-            "ledger_exists": self._ledger_path.exists(),
+            "expenses_ledger_exists": self._expenses_ledger_path.exists(),
+            "income_ledger_exists": self._income_ledger_path.exists(),
             "timesheet_exists": self._timesheet_path.exists(),
             "chat_exists": self._chat_path.exists(),
             "vault_file_count": len(vault_files),
@@ -464,7 +504,7 @@ class StorageBridge:
         """Delete ALL persisted data and re-initialise a clean profile."""
         if self._vault.exists():
             shutil.rmtree(self._vault)
-        for p in [self._ledger_path, self._timesheet_path, self._chat_path, self._manifest_path]:
+        for p in [self._expenses_ledger_path, self._income_ledger_path, self._timesheet_path, self._chat_path, self._manifest_path]:
             p.unlink(missing_ok=True)
         self._ensure_dirs()
 

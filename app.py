@@ -251,6 +251,8 @@ def init_state() -> None:
     chat = bridge.fetch_chat_history()
 
     st.session_state.ndeavour_initialized = True
+    st.session_state.expenses_ledger = bridge.fetch_expenses_ledger()
+    st.session_state.income_ledger = bridge.fetch_income_ledger()
     st.session_state.ledger = bridge.fetch_ledger()
     st.session_state.timesheet = bridge.fetch_timesheet()
     st.session_state.messages = chat if chat else [_DEFAULT_ASSISTANT_MSG]
@@ -273,8 +275,20 @@ def init_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _flush_expenses_ledger() -> None:
+    get_bridge().save_expenses_ledger(st.session_state.expenses_ledger)
+    st.session_state.ledger = get_bridge().fetch_ledger()
+
+
+def _flush_income_ledger() -> None:
+    get_bridge().save_income_ledger(st.session_state.income_ledger)
+    st.session_state.ledger = get_bridge().fetch_ledger()
+
+
 def _flush_ledger() -> None:
     get_bridge().save_ledger(st.session_state.ledger)
+    st.session_state.expenses_ledger = get_bridge().fetch_expenses_ledger()
+    st.session_state.income_ledger = get_bridge().fetch_income_ledger()
 
 
 def _flush_timesheet() -> None:
@@ -379,10 +393,10 @@ def add_timesheet_entry(entry_date: date, project: str, hours: float, rate: floa
           "source": "Timesheet"}],
         columns=LEDGER_COLUMNS,
     )
-    st.session_state.ledger = pd.concat(
-        [st.session_state.ledger, ledger_row[LEDGER_COLUMNS]], ignore_index=True
+    st.session_state.income_ledger = pd.concat(
+        [st.session_state.income_ledger, ledger_row[LEDGER_COLUMNS]], ignore_index=True
     )
-    _flush_ledger()
+    _flush_income_ledger()
 
 
 def format_usd(amount: float) -> str:
@@ -757,7 +771,10 @@ def render_permanent_registry() -> None:
             result = orchestrator.handle_reparse(
                 orig_name, content, st.session_state.ledger
             )
+            # Re-read segregated ledgers from state flush side effect
             st.session_state.ledger = result["ledger"]
+            st.session_state.expenses_ledger = bridge.fetch_expenses_ledger()
+            st.session_state.income_ledger = bridge.fetch_income_ledger()
             _status(f"Re-analysed {orig_name}.")
         st.rerun()
 
@@ -836,7 +853,8 @@ def render_permanent_registry() -> None:
             ["Profile directory", diag["profile_dir"]],
             ["Vault files on disk", str(diag["vault_file_count"])],
             ["Registry entries", str(diag["registry_count"])],
-            ["Ledger on disk", "Yes" if diag["ledger_exists"] else "No"],
+            ["Expenses Ledger exists", "Yes" if diag["expenses_ledger_exists"] else "No"],
+            ["Income Ledger exists", "Yes" if diag["income_ledger_exists"] else "No"],
             ["Timesheet on disk", "Yes" if diag["timesheet_exists"] else "No"],
             ["Chat history on disk", "Yes" if diag["chat_exists"] else "No"],
             ["Manifest version", diag["manifest_version"]],
@@ -987,6 +1005,8 @@ def render_dashboard(tax_rate: float) -> None:
                     )
                 if result["was_new"]:
                     st.session_state.ledger = result["ledger"]
+                    st.session_state.expenses_ledger = get_bridge().fetch_expenses_ledger()
+                    st.session_state.income_ledger = get_bridge().fetch_income_ledger()
                     st.success(result["message"])
                 else:
                     st.info(result["message"])
@@ -1070,9 +1090,9 @@ def render_timesheet(tax_rate: float) -> None:
     """Timesheet page: file upload, manual entry, monthly dashboard, full log."""
 
     # ── Section 1: Add hours ────────────────────────────────────────────────
-    _section("Add hours", "Intake",
+    _section("Income and Billable Hours Management", "Income Tracking",
              "Upload a timesheet CSV or add entries manually. "
-             "All data is saved to the permanent vault and survives app restarts.")
+             "All parsed data routes directly into income ledger datasets without interacting with expense rules.")
 
     upload_col, pad_col = st.columns([0.55, 0.45], gap="large")
     with upload_col:
@@ -1176,6 +1196,8 @@ def render_timesheet(tax_rate: float) -> None:
                                         [st.session_state.timesheet, new_ts], ignore_index=True
                                     )
                                     _flush_timesheet()
+                            st.session_state.expenses_ledger = get_bridge().fetch_expenses_ledger()
+                            st.session_state.income_ledger = get_bridge().fetch_income_ledger()
                             st.success(result["message"])
                             _status(f"Timesheet submitted: {result['message']}")
                         else:
@@ -1441,11 +1463,11 @@ absent the row is stored with `$0.00` pay.
                      help="Removes all timesheet entries and their ledger rows from disk."):
             _status("All timesheet entries cleared from disk.")
             st.session_state.timesheet = pd.DataFrame(columns=TIMESHEET_COLUMNS)
-            st.session_state.ledger = st.session_state.ledger[
-                ~st.session_state.ledger["source"].isin(["Timesheet"])
+            st.session_state.income_ledger = st.session_state.income_ledger[
+                ~st.session_state.income_ledger["source"].isin(["Timesheet"])
             ]
             _flush_timesheet()
-            _flush_ledger()
+            _flush_income_ledger()
             st.rerun()
 
 
@@ -1464,218 +1486,258 @@ def render_categorization_page() -> None:
     bridge = get_bridge()
     categories_list = bridge.fetch_tax_categories()
 
-    col_rules, col_grid = st.columns([0.35, 0.65], gap="large")
+    # EXPENSES EXCLUSIVE: Get only expenditures
+    expenses_df = st.session_state.expenses_ledger.copy()
 
-    # ── 1. DYNAMIC CATEGORY MANAGER (PRE-SETS) ───────────────────────────
-    with col_rules:
-        st.markdown("##### 📁  Category Rules Registry")
-        st.caption("Add custom expense categories to the preset lists used across transactions and dashboards.")
+    # Layout Hierarchy: Place the Interactive Transaction Grid (st.data_editor) at the absolute TOP of the page as the dominant focal point.
+    st.markdown("##### ✏️  Interactive Expense Grid")
+    st.caption("Review and edit your business expenditures. Double-click any Category cell to select from your dynamic presets.")
 
-        with st.form("add_category_form", clear_on_submit=True):
-            new_cat_name = st.text_input("New category name", placeholder="e.g. AI Infrastructure, Travel & Lodging")
-            submitted = st.form_submit_button("Add Preset Category", use_container_width=True)
+    if expenses_df.empty:
+        st.info("The expenses ledger is currently empty. Upload bank exports in the Dashboard to begin.")
+    else:
+        # We want to format date correctly for the editor
+        expenses_df["date"] = pd.to_datetime(expenses_df["date"]).dt.date
+        # Track changes to the grid
+        edited_df = st.data_editor(
+            expenses_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "date": st.column_config.DateColumn(
+                    "Date",
+                    format="YYYY-MM-DD",
+                    required=True,
+                ),
+                "description": st.column_config.TextColumn(
+                    "Description",
+                    required=True,
+                ),
+                "amount": st.column_config.NumberColumn(
+                    "Amount (USD)",
+                    format="$%.2f",
+                    required=True,
+                ),
+                "kind": st.column_config.SelectboxColumn(
+                    "Type",
+                    options=["expense"],
+                    required=True,
+                ),
+                "category": st.column_config.SelectboxColumn(
+                    "Category Presets",
+                    options=categories_list,
+                    required=True,
+                ),
+                "source": st.column_config.TextColumn(
+                    "Source",
+                    disabled=True,
+                ),
+            },
+            key="expenses_data_editor"
+        )
 
-            if submitted:
+        # Instantly commit audited entry back to disk without requiring a full manual reload trigger if edited
+        if not edited_df.equals(expenses_df):
+            st.session_state.expenses_ledger = edited_df
+            _flush_expenses_ledger()
+            st.success("Expenses ledger updated and committed instantly to secure storage!")
+            _status("Expenses ledger changes committed.")
+            st.rerun()
+
+    _divider_space(1.5)
+
+    col_presets, col_review = st.columns([0.45, 0.55], gap="large")
+
+    # ── 1. DYNAMIC CATEGORY RULES MANAGEMENT ───────────────────────────
+    with col_presets:
+        st.markdown("##### 📁  Manage Category Pre-sets")
+        st.caption("Create, edit or delete expense categories. Standard categories cannot be deleted.")
+
+        # Subsection widget 1: Create a new preset
+        with st.form("create_category_form", clear_on_submit=True):
+            st.markdown("**Create New Category**")
+            new_cat_name = st.text_input("Category label", placeholder="e.g. AI Infrastructure")
+            create_submitted = st.form_submit_button("Create Category", use_container_width=True)
+
+            if create_submitted:
                 success, msg = bridge.add_tax_category(new_cat_name)
                 if success:
                     st.success(msg)
-                    _status(f"Category added: {new_cat_name}")
+                    _status(f"Category created: {new_cat_name}")
                     st.rerun()
                 else:
                     st.error(msg)
 
         _divider_space(0.5)
-        st.markdown("**Active presets registry**")
-        st.caption("Standard or user-defined categories. Standard categories cannot be deleted.")
 
-        # Show current custom and standard presets with a simple clean layout
-        for cat in categories_list:
-            is_standard = cat in [
-                "Revenue", "Software", "Contractors", "Travel", "Meals",
-                "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized"
-            ]
-            c_label, c_action = st.columns([0.72, 0.28], vertical_alignment="center")
-            with c_label:
-                st.markdown(f"• **{cat}** {'*(Preset)*' if is_standard else ''}")
-            with c_action:
-                if not is_standard:
-                    if st.button("Delete", key=f"del_cat_{cat}", use_container_width=True):
-                        success, msg = bridge.delete_tax_category(cat)
-                        if success:
-                            st.success(msg)
-                            _status(f"Category deleted: {cat}")
-                            st.rerun()
-                        else:
-                            st.error(msg)
-
-    # ── 2. INTERACTIVE TRANSACTION GRID (MANUAL ADJUSTMENTS) ──────────────
-    with col_grid:
-        st.markdown("##### ✏️  Interactive Transaction Grid")
-        st.caption("Review and edit your full transactions ledger. Double-click any Category cell to select from your dynamic presets.")
-
-        ledger_df = st.session_state.ledger.copy()
-        if ledger_df.empty:
-            st.info("The ledger is currently empty. Upload bank exports in the Dashboard to begin.")
-        else:
-            # We want to format date correctly for the editor
-            ledger_df["date"] = pd.to_datetime(ledger_df["date"]).dt.date
-            # Track changes to the grid
-            edited_df = st.data_editor(
-                ledger_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "date": st.column_config.DateColumn(
-                        "Date",
-                        format="YYYY-MM-DD",
-                        required=True,
-                    ),
-                    "description": st.column_config.TextColumn(
-                        "Description",
-                        required=True,
-                    ),
-                    "amount": st.column_config.NumberColumn(
-                        "Amount (USD)",
-                        format="$%.2f",
-                        required=True,
-                    ),
-                    "kind": st.column_config.SelectboxColumn(
-                        "Type",
-                        options=["income", "expense"],
-                        required=True,
-                    ),
-                    "category": st.column_config.SelectboxColumn(
-                        "Category Presets",
-                        options=categories_list,
-                        required=True,
-                    ),
-                    "source": st.column_config.TextColumn(
-                        "Source",
-                        disabled=True,
-                    ),
-                },
-                key="ledger_data_editor"
+        # Subsection widget 2: Edit an existing category label
+        with st.form("edit_category_form", clear_on_submit=True):
+            st.markdown("**Edit Category Label**")
+            edit_target = st.selectbox(
+                "Select category to edit",
+                options=[c for c in categories_list if c not in [
+                    "Revenue", "Software", "Contractors", "Travel", "Meals",
+                    "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized"
+                ]],
+                help="Only custom-created categories can be renamed."
             )
+            edited_label = st.text_input("New category label", placeholder="Enter renamed label")
+            edit_submitted = st.form_submit_button("Update Label", use_container_width=True)
 
-            # Instantly commit audited entry back to disk without requiring a full manual reload trigger if edited
-            if not edited_df.equals(ledger_df):
-                st.session_state.ledger = edited_df
-                _flush_ledger()
-                st.success("Ledger updated and committed instantly to secure storage!")
-                _status("Ledger changes committed.")
-                st.rerun()
+            if edit_submitted:
+                if not edited_label.strip():
+                    st.error("Renamed label cannot be empty.")
+                else:
+                    # Update label logic
+                    success, msg = bridge.delete_tax_category(edit_target)
+                    if success:
+                        bridge.add_tax_category(edited_label)
+                        # Fallback any transactions matching the edited target to the renamed label
+                        exp_ledger = st.session_state.expenses_ledger.copy()
+                        exp_ledger.loc[exp_ledger["category"] == edit_target, "category"] = edited_label.strip()
+                        st.session_state.expenses_ledger = exp_ledger
+                        _flush_expenses_ledger()
+                        st.success(f"Successfully updated category label from '{edit_target}' to '{edited_label}'!")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        _divider_space(0.5)
+
+        # Subsection widget 3: Delete an expense category
+        with st.form("delete_category_form", clear_on_submit=True):
+            st.markdown("**Delete Category**")
+            delete_target = st.selectbox(
+                "Select category to delete",
+                options=[c for c in categories_list if c not in [
+                    "Revenue", "Software", "Contractors", "Travel", "Meals",
+                    "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized"
+                ]],
+                help="Only custom-created categories can be deleted. Standard default categories are fixed."
+            )
+            delete_submitted = st.form_submit_button("Delete Category Preset", use_container_width=True)
+
+            if delete_submitted:
+                success, msg = bridge.delete_tax_category(delete_target)
+                if success:
+                    # Provide a safe fallback rule in the pandas data layer to reset any assigned transactions to 'Uncategorized'
+                    exp_ledger = st.session_state.expenses_ledger.copy()
+                    exp_ledger.loc[exp_ledger["category"] == delete_target, "category"] = "Uncategorized"
+                    st.session_state.expenses_ledger = exp_ledger
+                    _flush_expenses_ledger()
+                    st.success(f"Category '{delete_target}' deleted. All matching expenses reset to 'Uncategorized'.")
+                    _status(f"Category deleted: {delete_target}")
+                    st.rerun()
+                else:
+                    st.error(msg)
 
     # ── 3. "REVIEW INSTANCES" DRILLDOWN WINDOW ────────────────────────────
-    _divider_space(1.5)
-    _section(
-        "Review Instances Drilldown",
-        "AI Analysis",
-        "Select a transaction details descriptor below to get automated inline classification analysis."
-    )
+    with col_review:
+        st.markdown("##### 🔍  Review Instance Panel")
+        st.caption("Inspect why a specific vendor expense was initially classified under its assigned preset category.")
 
-    ledger_df = st.session_state.ledger
-    if ledger_df.empty:
-        st.info("No transaction records loaded to review.")
-    else:
-        # User selection drilldown panel
-        selected_desc = st.selectbox(
-            "Select transaction description to analyze",
-            options=sorted(ledger_df["description"].unique().tolist()),
-            index=0,
-            help="Select any description to inspect its classification intelligence pattern.",
-            key="analysis_descriptor_selector"
-        )
+        if expenses_df.empty:
+            st.info("No transaction records loaded to review.")
+        else:
+            # User selection drilldown panel
+            selected_desc = st.selectbox(
+                "Select transaction description to analyze",
+                options=sorted(expenses_df["description"].unique().tolist()),
+                index=0,
+                help="Select any description to inspect its classification intelligence pattern.",
+                key="analysis_descriptor_selector"
+            )
 
-        if selected_desc:
-            matching_rows = ledger_df[ledger_df["description"] == selected_desc]
-            row_count = len(matching_rows)
-            sample_row = matching_rows.iloc[0]
-            current_category = sample_row["category"]
-            current_amount = sample_row["amount"]
-            current_kind = sample_row["kind"]
+            if selected_desc:
+                matching_rows = expenses_df[expenses_df["description"] == selected_desc]
+                row_count = len(matching_rows)
+                sample_row = matching_rows.iloc[0]
+                current_category = sample_row["category"]
+                current_amount = sample_row["amount"]
+                current_kind = sample_row["kind"]
 
-            with st.expander(f"🔍  Vendor Intelligence Profile: **{selected_desc}**", expanded=True):
-                # Basic context data
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("Total Occurrences", f"{row_count} row(s)")
-                with c2:
-                    st.metric("Assigned Category", current_category)
-                with c3:
-                    st.metric("Sample Value", format_usd(current_amount))
+                with st.expander(f"🔍  Vendor Intelligence Profile: **{selected_desc}**", expanded=True):
+                    # Basic context data
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("Total Occurrences", f"{row_count} row(s)")
+                    with c2:
+                        st.metric("Assigned Category", current_category)
+                    with c3:
+                        st.metric("Sample Value", format_usd(current_amount))
 
-                # Lazy import openai or compute deterministic rule logic fallback
-                api_key = os.getenv("OPENAI_API_KEY")
-                
-                # Check for streamlit secrets key
-                if not api_key:
-                    try:
-                        api_key = st.secrets.get("OPENAI_API_KEY")
-                    except Exception:
-                        pass
-
-                if api_key:
-                    with st.spinner("Phreedom AI is auditing historical vendor classification logic..."):
+                    # Lazy import openai or compute deterministic rule logic fallback
+                    api_key = os.getenv("OPENAI_API_KEY")
+                    
+                    # Check for streamlit secrets key
+                    if not api_key:
                         try:
-                            from openai import OpenAI
-                            client = OpenAI(api_key=api_key)
-                            
-                            system_prompt = (
-                                "You are Phreedom, an advanced personal finance categorization analyzer. "
-                                "Your goal is to inspect a given transaction and explain why it fits into its current category. "
-                                "Look for standard merchant pattern words, billing structures, or common industry trends. "
-                                "Provide a concise summary (max 3 sentences) explaining the mapping, and end your explanation "
-                                "by rating your classification confidence on an absolute percentage scale (e.g. 'Confidence Metric: **95%**')."
-                            )
-                            user_prompt = (
-                                f"Merchant Name: '{selected_desc}'\n"
-                                f"Current Category Map: '{current_category}'\n"
-                                f"Transaction Type: '{current_kind}'\n"
-                                f"Transaction Value: '{format_usd(current_amount)}'"
-                            )
-                            
-                            response = client.chat.completions.create(
-                                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                                messages=[
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ],
-                                temperature=0.2,
-                                max_tokens=150
-                            )
-                            explanation = response.choices[0].message.content or ""
-                            st.markdown(f"**Classification Summary:**\n\n{explanation}")
-                        except Exception as e:
-                            st.warning(f"Failed to query AI classification API: {e}")
-                            st.markdown("**Deterministic Confidence Metric:** **85%** *(Deterministic Mapping)*")
-                else:
-                    # Deterministic Keyword confidence matching
-                    st.caption("*(OpenAI key not active; falling back to deterministic category rules engine analysis)*")
-                    confidence = 80
-                    # If matches standard common terms
-                    from app import CC_SPEND_CATEGORIES
-                    matched = False
-                    for standard_cat, keywords in CC_SPEND_CATEGORIES.items():
-                        if any(kw in selected_desc.lower() for kw in keywords):
+                            api_key = st.secrets.get("OPENAI_API_KEY")
+                        except Exception:
+                            pass
+
+                    if api_key:
+                        with st.spinner("Phreedom AI is auditing historical vendor classification logic..."):
+                            try:
+                                from openai import OpenAI
+                                client = OpenAI(api_key=api_key)
+                                
+                                system_prompt = (
+                                    "You are Phreedom, an advanced personal finance categorization analyzer. "
+                                    "Your goal is to inspect a given transaction and explain why it fits into its current category. "
+                                    "Look for standard merchant pattern words, billing structures, or common industry trends. "
+                                    "Provide a concise summary (max 3 sentences) explaining the mapping, and end your explanation "
+                                    "by rating your classification confidence on an absolute percentage scale (e.g. 'Confidence Metric: **95%**')."
+                                )
+                                user_prompt = (
+                                    f"Merchant Name: '{selected_desc}'\n"
+                                    f"Current Category Map: '{current_category}'\n"
+                                    f"Transaction Type: '{current_kind}'\n"
+                                    f"Transaction Value: '{format_usd(current_amount)}'"
+                                )
+                                
+                                response = client.chat.completions.create(
+                                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                                    messages=[
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": user_prompt}
+                                    ],
+                                    temperature=0.2,
+                                    max_tokens=150
+                                )
+                                explanation = response.choices[0].message.content or ""
+                                st.markdown(f"**Classification Summary:**\n\n{explanation}")
+                            except Exception as e:
+                                st.warning(f"Failed to query AI classification API: {e}")
+                                st.markdown("**Deterministic Confidence Metric:** **85%** *(Deterministic Mapping)*")
+                    else:
+                        # Deterministic Keyword confidence matching
+                        st.caption("*(OpenAI key not active; falling back to deterministic category rules engine analysis)*")
+                        confidence = 80
+                        # If matches standard common terms
+                        from app import CC_SPEND_CATEGORIES
+                        matched = False
+                        for standard_cat, keywords in CC_SPEND_CATEGORIES.items():
+                            if any(kw in selected_desc.lower() for kw in keywords):
+                                st.markdown(
+                                    f"**Classification Summary:**\n\n"
+                                    f"The vendor descriptor **'{selected_desc}'** matched the keyword classification registry rules list for the "
+                                    f"group **'{standard_cat}'**. Historical transaction ingestion records successfully verified "
+                                    f"this merchant format as a standard business cost, which maps directly to your target tax ledger rules."
+                                )
+                                confidence = 95
+                                matched = True
+                                break
+                        
+                        if not matched:
                             st.markdown(
                                 f"**Classification Summary:**\n\n"
-                                f"The vendor descriptor **'{selected_desc}'** matched the keyword classification registry rules list for the "
-                                f"group **'{standard_cat}'**. Historical transaction ingestion records successfully verified "
-                                f"this merchant format as a standard business cost, which maps directly to your target tax ledger rules."
+                                f"The merchant **'{selected_desc}'** does not match any automatic vendor keyword mappings. "
+                                f"It was assigned to the fallback category **'{current_category}'**. A manual categorization check "
+                                f"or custom category pre-set configuration rules adjustment is recommended to establish high-confidence tax ledgers."
                             )
-                            confidence = 95
-                            matched = True
-                            break
-                    
-                    if not matched:
-                        st.markdown(
-                            f"**Classification Summary:**\n\n"
-                            f"The merchant **'{selected_desc}'** does not match any automatic vendor keyword mappings. "
-                            f"It was assigned to the fallback category **'{current_category}'**. A manual categorization check "
-                            f"or custom category pre-set configuration rules adjustment is recommended to establish high-confidence tax ledgers."
-                        )
-                    
-                    st.markdown(f"Confidence Metric: **{confidence}%**")
+                        
+                        st.markdown(f"Confidence Metric: **{confidence}%**")
 
 
 # ---------------------------------------------------------------------------
