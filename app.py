@@ -37,7 +37,7 @@ from storage_bridge import get_bridge
 
 LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
-APP_PAGES = ["Dashboard", "Timesheet", "Categorization", "Chat"]
+APP_PAGES = ["Dashboard", "Timesheet", "Categorization", "Admin Control Panel", "Chat"]
 
 CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
 DATE_RE = re.compile(
@@ -190,19 +190,23 @@ def render_auth_flow() -> bool:
                     if not username or not password:
                         st.error("Please fill in all fields.")
                     else:
-                        success, result_username = auth_store.authenticate(username, password)
+                        success, result_auth = auth_store.authenticate(username, password)
                         if success:
-                            st.session_state.authenticated_user = result_username
-                            # Assign isolated StorageBridge
-                            user_profile_dir = f".ndeavour_profile/users/{result_username}"
+                            # result_auth is the user profile dict
+                            st.session_state.authenticated_user = result_auth["username"]
+                            st.session_state.authenticated_user_id = result_auth["user_id"]
+                            st.session_state.authenticated_user_role = result_auth.get("role", "Standard User")
+                            
+                            # Assign isolated StorageBridge resolving via secure user_id
+                            user_profile_dir = f".ndeavour_profile/users/{result_auth['user_id']}"
                             st.session_state.storage_bridge = StorageBridge(user_profile_dir)
                             # Create clean orchestrator for this user
                             st.session_state.orchestrator = OrchestratorAgent(st.session_state.storage_bridge)
-                            st.success(f"Welcome back, {result_username}!")
+                            st.success(f"Welcome back, {result_auth['username']}!")
                             _status("Successfully logged in.")
                             st.rerun()
                         else:
-                            st.error(result_username)
+                            st.error(result_auth)
 
         with tab_register:
             st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
@@ -220,14 +224,21 @@ def render_auth_flow() -> bool:
                     else:
                         success, message = auth_store.register(reg_username, reg_password)
                         if success:
-                            # Auto login after successful registration
-                            st.session_state.authenticated_user = reg_username
-                            user_profile_dir = f".ndeavour_profile/users/{reg_username}"
-                            st.session_state.storage_bridge = StorageBridge(user_profile_dir)
-                            st.session_state.orchestrator = OrchestratorAgent(st.session_state.storage_bridge)
-                            st.success("Registration successful! Logging you in...")
-                            _status("Successfully registered and logged in.")
-                            st.rerun()
+                            # Registration successful, now authenticate to get profile metadata
+                            auth_success, result_auth = auth_store.authenticate(reg_username, reg_password)
+                            if auth_success:
+                                st.session_state.authenticated_user = result_auth["username"]
+                                st.session_state.authenticated_user_id = result_auth["user_id"]
+                                st.session_state.authenticated_user_role = result_auth.get("role", "Standard User")
+                                
+                                user_profile_dir = f".ndeavour_profile/users/{result_auth['user_id']}"
+                                st.session_state.storage_bridge = StorageBridge(user_profile_dir)
+                                st.session_state.orchestrator = OrchestratorAgent(st.session_state.storage_bridge)
+                                st.success("Registration successful! Logging you in...")
+                                _status("Successfully registered and logged in.")
+                                st.rerun()
+                            else:
+                                st.error("Failed to automatically authenticate after registration.")
                         else:
                             st.error(message)
 
@@ -527,11 +538,13 @@ input:focus-visible,textarea:focus-visible,
     background-color: rgba(13, 122, 135, 0.03) !important;
 }
 .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-    transition: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease !important;
+    transition: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
 }
 .stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
     transform: translateY(-1px) !important;
     border-color: #0D7A87 !important;
+    background-color: #0D7A87 !important;
+    color: #FFFFFF !important;
     box-shadow: 0 4px 12px rgba(13, 122, 135, 0.3) !important;
 }
 
@@ -639,7 +652,13 @@ def render_nav() -> str:
             with st.popover("☰  Menu"):
                 st.markdown("**Navigate**")
                 st.divider()
+                
+                # Check user role and restrict access to Admin Control Panel
+                is_admin = st.session_state.get("authenticated_user_role", "Standard User") == "Administrator"
+                
                 for page in APP_PAGES:
+                    if page == "Admin Control Panel" and not is_admin:
+                        continue  # Skip for Standard User
                     is_active = page == st.session_state.active_page
                     label = f"→  {page}" if is_active else f"   {page}"
                     if st.button(label, key=f"_nav_{page}", use_container_width=True, disabled=is_active):
@@ -647,7 +666,7 @@ def render_nav() -> str:
                         _status(f"Navigated to {page}.")
                         st.rerun()
                 st.divider()
-                st.markdown(f"Logged in as: **{st.session_state.authenticated_user}**")
+                st.markdown(f"User: **{st.session_state.authenticated_user}**\nRole: *{st.session_state.get('authenticated_user_role', 'Standard User')}*")
                 if st.button("🚪  Log out", key="_nav_logout", use_container_width=True):
                     # Clear session state for logout
                     for key in list(st.session_state.keys()):
@@ -1741,6 +1760,113 @@ def render_categorization_page() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page: Admin Control Panel
+# ---------------------------------------------------------------------------
+
+def render_admin_dashboard() -> None:
+    """Isolated Admin Control Panel route accessible only to profiles flagged explicitly with administrative privileges."""
+    # Safety Check: Enforce role-based security
+    if st.session_state.get("authenticated_user_role", "Standard User") != "Administrator":
+        st.error("Access Denied: Administrative privileges are required to view this page.")
+        _status("Access denied to Admin Control Panel.")
+        return
+
+    _section(
+        "Admin Control Panel",
+        "System Administration",
+        "Overview of all registered user workspaces, creation records, permission assignments, and status toggles."
+    )
+
+    from storage_bridge import AuthStore
+    auth_store = AuthStore()
+    user_list = auth_store.list_all_users()
+
+    col_form, col_table = st.columns([0.4, 0.6], gap="large")
+
+    with col_form:
+        st.markdown("##### ➕  Add New Team Account")
+        st.caption("Register a new structured user profile directly from this dashboard.")
+
+        with st.form("admin_add_user_form", clear_on_submit=True):
+            new_username = st.text_input("Username", placeholder="3-20 characters, alphanumeric/underscores")
+            new_password = st.text_input("Password", type="password", placeholder="At least 6 characters")
+            new_role = st.selectbox("Assign Account Role", options=["Standard User", "Administrator"])
+            submit_add = st.form_submit_button("Register Team Account", use_container_width=True)
+
+            if submit_add:
+                if not new_username or not new_password:
+                    st.error("All credential fields are required.")
+                else:
+                    success, msg = auth_store.register(new_username, new_password, role=new_role)
+                    if success:
+                        st.success(f"Successfully registered account for '{new_username}' with '{new_role}' role!")
+                        _status(f"Registered user: {new_username}")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        _divider_space(1.0)
+        st.markdown("##### ⚙️  Modify User Settings")
+        st.caption("Select any registered workspace account to alter active statuses or permissions level.")
+
+        # Exclude self from adjustments to prevent self-deactivation/lockout
+        current_self = st.session_state.authenticated_user
+        modifiable_users = [u["username"] for u in user_list if u["username"] != current_self]
+
+        if not modifiable_users:
+            st.info("No other registered accounts are currently available to modify.")
+        else:
+            with st.form("admin_modify_user_form", clear_on_submit=True):
+                target_user = st.selectbox("Select User Profile", options=modifiable_users)
+                
+                # Fetch target's current attributes
+                target_data = next(u for u in user_list if u["username"] == target_user)
+                
+                new_status = st.selectbox(
+                    "Account Access Status", 
+                    options=["Active", "Suspended"], 
+                    index=0 if target_data["status"] == "Active" else 1
+                )
+                new_role_assign = st.selectbox(
+                    "Permissions Role", 
+                    options=["Standard User", "Administrator"], 
+                    index=0 if target_data["role"] == "Standard User" else 1
+                )
+                
+                submit_modify = st.form_submit_button("Commit Workspace Modifications", use_container_width=True)
+
+                if submit_modify:
+                    status_ok = auth_store.update_user_status(target_user, new_status)
+                    role_ok = auth_store.update_user_role(target_user, new_role_assign)
+                    if status_ok and role_ok:
+                        st.success(f"Workspace updates committed successfully for '{target_user}'!")
+                        _status(f"Modified user workspace: {target_user}")
+                        st.rerun()
+                    else:
+                        st.error("Failed to commit user workspace modifications.")
+
+    with col_table:
+        st.markdown("##### 👥  Registered User Profiles")
+        st.caption("Real-time table of all structured workspace directory configurations across this instance.")
+
+        if not user_list:
+            st.info("No registered users found.")
+        else:
+            admin_df = pd.DataFrame(user_list)
+            # Retheme/Format presentation headers
+            admin_df = admin_df.rename(columns={
+                "username": "Username",
+                "user_id": "Secure User ID",
+                "role": "Account Role",
+                "created_at": "Registration Record",
+                "status": "Access Status"
+            })
+            # Format dates nicely
+            admin_df["Registration Record"] = pd.to_datetime(admin_df["Registration Record"]).dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(admin_df, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
 # Page: Chat
 # ---------------------------------------------------------------------------
 
@@ -1809,6 +1935,8 @@ def main() -> None:
         render_timesheet(tax_rate)
     elif active_page == "Categorization":
         render_categorization_page()
+    elif active_page == "Admin Control Panel":
+        render_admin_dashboard()
     elif active_page == "Chat":
         render_chat_page(tax_rate, business_type, tax_notes)
 

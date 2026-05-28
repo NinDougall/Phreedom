@@ -73,7 +73,7 @@ class AuthStore:
 
     def __init__(self, base_dir: Path | str = ".ndeavour_profile") -> None:
         self._base = Path(base_dir).resolve()
-        self._users_file = self._base / "users.json"
+        self._users_file = self._base / "user_registry.json"
         self._ensure_base()
 
     def _ensure_base(self) -> None:
@@ -90,7 +90,7 @@ class AuthStore:
     def _write_users(self, users: dict[str, dict[str, Any]]) -> None:
         self._users_file.write_text(json.dumps(users, indent=2), encoding="utf-8")
 
-    def register(self, username: str, password: str) -> tuple[bool, str]:
+    def register(self, username: str, password: str, role: str = "Standard User") -> tuple[bool, str]:
         """Register a new user.
 
         Usernames must be 3-20 characters and alphanumeric/underscore.
@@ -107,15 +107,23 @@ class AuthStore:
         if username_lower in {u.lower() for u in users}:
             return False, f"Username '{username}' is already taken."
 
+        # If it is the first registered user, make them an Administrator, otherwise Standard User
+        assigned_role = "Administrator" if not users else role
+
+        user_id = secrets.token_hex(8)  # Unique, secure random user id (16 chars)
+
         users[username] = {
+            "user_id": user_id,
             "password_hash": hash_password(password),
+            "role": assigned_role,
             "created_at": datetime.now().isoformat(),
+            "status": "Active",
         }
         self._write_users(users)
         return True, "Registration successful."
 
-    def authenticate(self, username: str, password: str) -> tuple[bool, str]:
-        """Authenticate a user and return username with casing preserved."""
+    def authenticate(self, username: str, password: str) -> tuple[bool, Any]:
+        """Authenticate a user and return (success, user_dict) or (failure, error_msg)."""
         username = username.strip()
         users = self._read_users()
         
@@ -130,10 +138,48 @@ class AuthStore:
             return False, "Invalid username or password."
 
         user_data = users[matched_username]
+        if user_data.get("status", "Active") != "Active":
+            return False, "Your account has been deactivated. Please contact an Administrator."
+
         if verify_password(password, user_data["password_hash"]):
-            return True, matched_username
+            # Return username with preserved casing and metadata dict
+            profile = dict(user_data)
+            profile["username"] = matched_username
+            return True, profile
         
         return False, "Invalid username or password."
+
+    def list_all_users(self) -> list[dict[str, Any]]:
+        """Return a formatted list of all registered users for administration."""
+        users = self._read_users()
+        return [
+            {
+                "username": username,
+                "user_id": data.get("user_id", "—"),
+                "role": data.get("role", "Standard User"),
+                "created_at": data.get("created_at", "—"),
+                "status": data.get("status", "Active")
+            }
+            for username, data in users.items()
+        ]
+
+    def update_user_status(self, username: str, status: str) -> bool:
+        """Update a user account active status (e.g. Active, Suspended)."""
+        users = self._read_users()
+        if username not in users:
+            return False
+        users[username]["status"] = status
+        self._write_users(users)
+        return True
+
+    def update_user_role(self, username: str, role: str) -> bool:
+        """Update a user's permissions level (e.g. 'Standard User', 'Administrator')."""
+        users = self._read_users()
+        if username not in users:
+            return False
+        users[username]["role"] = role
+        self._write_users(users)
+        return True
 
 
 # ---------------------------------------------------------------------------
