@@ -206,7 +206,8 @@ def render_auth_flow() -> bool:
                             _status("Successfully logged in.")
                             st.rerun()
                         else:
-                            st.error(result_auth)
+                            # result_auth is a string error message on authentication failure (e.g. Invalid username or password)
+                            st.error(str(result_auth))
 
         with tab_register:
             st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
@@ -238,7 +239,8 @@ def render_auth_flow() -> bool:
                                 _status("Successfully registered and logged in.")
                                 st.rerun()
                             else:
-                                st.error("Failed to automatically authenticate after registration.")
+                                # Safe fallback if auth dict extraction failed
+                                st.error(f"Failed to automatically authenticate after registration: {result_auth}")
                         else:
                             st.error(message)
 
