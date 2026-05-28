@@ -152,8 +152,20 @@ class OrchestratorAgent:
 
         # ── Merge transactions ────────────────────────────────────────
         assert result.parsed is not None
-        new_ledger = self._merge_ledger(current_ledger, result.parsed.transactions)
-        self._bridge.save_ledger(new_ledger)
+        if result.is_timesheet:
+            # Route directly into the segregated income dataset
+            current_inc = self._bridge.fetch_income_ledger()
+            new_inc = self._merge_ledger(current_inc, result.parsed.transactions)
+            self._bridge.save_income_ledger(new_inc)
+            # Fetch for output
+            new_ledger = self._bridge.fetch_ledger()
+        else:
+            # Route directly into the segregated expenses dataset
+            current_exp = self._bridge.fetch_expenses_ledger()
+            new_exp = self._merge_ledger(current_exp, result.parsed.transactions)
+            self._bridge.save_expenses_ledger(new_exp)
+            # Fetch for output
+            new_ledger = self._bridge.fetch_ledger()
 
         # ── Handle timesheet data ─────────────────────────────────────
         new_timesheet: pd.DataFrame | None = None
@@ -266,10 +278,22 @@ class OrchestratorAgent:
         """
         parsed = self._ingestion_worker.reparse(file_name, content)
 
-        # Remove old rows for this source, then merge fresh ones
-        stripped = current_ledger[current_ledger["source"] != file_name].copy()
-        new_ledger = self._merge_ledger(stripped, parsed.transactions)
-        self._bridge.save_ledger(new_ledger)
+        # Detect timesheet vs typical expense
+        # Use simple name pattern or ingestion detection rules
+        is_timesheet = file_name.lower().endswith(".csv") and ("timesheet" in file_name.lower() or "hours" in file_name.lower())
+        
+        if is_timesheet:
+            current_inc = self._bridge.fetch_income_ledger()
+            stripped = current_inc[current_inc["source"] != file_name].copy()
+            new_inc = self._merge_ledger(stripped, parsed.transactions)
+            self._bridge.save_income_ledger(new_inc)
+        else:
+            current_exp = self._bridge.fetch_expenses_ledger()
+            stripped = current_exp[current_exp["source"] != file_name].copy()
+            new_exp = self._merge_ledger(stripped, parsed.transactions)
+            self._bridge.save_expenses_ledger(new_exp)
+
+        new_ledger = self._bridge.fetch_ledger()
 
         # Update vault metadata
         import hashlib
@@ -290,7 +314,7 @@ class OrchestratorAgent:
             "message": parsed.summary,
             "ledger": new_ledger,
             "timesheet": None,
-            "is_timesheet": False,
+            "is_timesheet": is_timesheet,
             "ingestion_result": parsed.to_dict(),
             "tax_summary": summary.to_dict(),
         }
