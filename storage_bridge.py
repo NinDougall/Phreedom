@@ -23,7 +23,7 @@ import hashlib
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -90,14 +90,21 @@ class AuthStore:
     def _write_users(self, users: dict[str, dict[str, Any]]) -> None:
         self._users_file.write_text(json.dumps(users, indent=2), encoding="utf-8")
 
-    def register(self, username: str, password: str, role: str = "Standard User") -> tuple[bool, str]:
+    def register(self, username: str, password: str, email: str, role: str = "Standard User") -> tuple[bool, str]:
         """Register a new user.
 
         Usernames must be 3-20 characters and alphanumeric/underscore.
+        Emails must be valid and unique.
         """
         username = username.strip()
         if not re.match(r"^[a-zA-Z0-9_]{3,20}$", username):
             return False, "Username must be 3-20 characters and only contain letters, numbers, and underscores."
+
+        email = email.strip()
+        # Strict email regex verification
+        email_regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+        if not re.match(email_regex, email):
+            return False, "Invalid email address format."
 
         if len(password) < 6:
             return False, "Password must be at least 6 characters long."
@@ -107,6 +114,11 @@ class AuthStore:
         if username_lower in {u.lower() for u in users}:
             return False, f"Username '{username}' is already taken."
 
+        # Enforce unique email constraint
+        email_lower = email.lower()
+        if email_lower in {u.get("email", "").lower() for u in users.values()}:
+            return False, f"Email address '{email}' is already registered."
+
         # If it is the first registered user, make them an Administrator, otherwise Standard User
         assigned_role = "Administrator" if not users else role
 
@@ -114,6 +126,7 @@ class AuthStore:
 
         users[username] = {
             "user_id": user_id,
+            "email": email,
             "password_hash": hash_password(password),
             "role": assigned_role,
             "created_at": datetime.now().isoformat(),
@@ -180,6 +193,85 @@ class AuthStore:
         users[username]["role"] = role
         self._write_users(users)
         return True
+
+    def generate_reset_token(self, email: str) -> tuple[bool, str]:
+        """Generate a cryptographically secure, time-sensitive reset token for an email."""
+        email = email.strip().lower()
+        users = self._read_users()
+        
+        matched_username = None
+        for username, data in users.items():
+            if data.get("email", "").strip().lower() == email:
+                matched_username = username
+                break
+                
+        if not matched_username:
+            return False, "No account found with that email address."
+            
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        expires_at = (datetime.now() + timedelta(minutes=15)).isoformat()
+        
+        users[matched_username]["reset_token_hash"] = token_hash
+        users[matched_username]["reset_token_expires"] = expires_at
+        self._write_users(users)
+        
+        return True, token
+
+    def verify_reset_token(self, token: str) -> tuple[bool, str]:
+        """Verify the reset token hash and check if it has expired.
+        
+        Returns (success, username) or (failure, error_msg).
+        """
+        token = token.strip()
+        if not token:
+            return False, "Token cannot be empty."
+            
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        users = self._read_users()
+        
+        matched_username = None
+        for username, data in users.items():
+            if data.get("reset_token_hash") == token_hash:
+                matched_username = username
+                break
+                
+        if not matched_username:
+            return False, "Invalid or unrecognized reset token."
+            
+        expires_str = users[matched_username].get("reset_token_expires")
+        if not expires_str:
+            return False, "Reset token has expired or is invalid."
+            
+        try:
+            expires_at = datetime.fromisoformat(expires_str)
+        except Exception:
+            return False, "Invalid expiration timestamp format."
+            
+        if datetime.now() > expires_at:
+            return False, "Reset token has expired (15-minute limit exceeded)."
+            
+        return True, matched_username
+
+    def reset_password_with_token(self, token: str, new_password: str) -> tuple[bool, str]:
+        """Reset user password using a valid reset token."""
+        success, result = self.verify_reset_token(token)
+        if not success:
+            return False, result
+            
+        username = result
+        if len(new_password) < 6:
+            return False, "Password must be at least 6 characters long."
+            
+        users = self._read_users()
+        users[username]["password_hash"] = hash_password(new_password)
+        
+        # Clear the token after successful reset to prevent reuse
+        users[username].pop("reset_token_hash", None)
+        users[username].pop("reset_token_expires", None)
+        
+        self._write_users(users)
+        return True, "Password reset successful."
 
 
 # ---------------------------------------------------------------------------
