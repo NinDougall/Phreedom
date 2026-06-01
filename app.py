@@ -160,6 +160,341 @@ def render_auth_flow() -> bool:
 
     from storage_bridge import AuthStore, StorageBridge
     auth_store = AuthStore()
+    from utils.mailer import send_reset_email
+
+    # Check for reset token in URL query parameters
+    if "token" in st.query_params:
+        st.session_state.auth_view = "reset_password"
+        st.session_state.reset_token = st.query_params["token"]
+
+    # Route to forgot password or reset password views if requested
+    if st.session_state.get("auth_view") == "forgot_password":
+        # Inject custom N-Deavour light mode CSS
+        st.markdown(
+            """
+            <style>
+            .stApp {
+                background-color: #F8FAFC !important;
+                background-image: none !important;
+                color: #0F172A !important;
+            }
+            h1, h2, h3, h4, h5, h6, p, label, span, div, li {
+                color: #0F172A !important;
+            }
+            div[data-testid="stForm"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                border-radius: 0.85rem !important;
+                padding: 2.5rem !important;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03) !important;
+            }
+            input, textarea, select {
+                background-color: #FFFFFF !important;
+                color: #0F172A !important;
+                border: 1px solid #CBD5E1 !important;
+                border-radius: 0.55rem !important;
+            }
+            input:focus {
+                border-color: #0D7A87 !important;
+                box-shadow: 0 0 0 2px rgba(13, 122, 135, 0.2) !important;
+            }
+            .stButton>button, .stFormSubmitButton>button {
+                background-color: #0D7A87 !important;
+                color: #FFFFFF !important;
+                border: 1px solid #0D7A87 !important;
+                border-radius: 0.55rem !important;
+                font-weight: 700 !important;
+                transition: all 0.2s ease !important;
+            }
+            .stButton>button:hover, .stFormSubmitButton>button:hover {
+                background-color: #0A5C66 !important;
+                border-color: #0A5C66 !important;
+                color: #FFFFFF !important;
+                box-shadow: 0 4px 12px rgba(13, 122, 135, 0.35) !important;
+                transform: translateY(-1px) !important;
+            }
+            div[data-testid="stAlert"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                color: #0F172A !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
+        with col2:
+            _divider_space(2.0)
+            st.markdown(
+                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
+                f'<div><div class="nd-nav-wordmark" style="color: #0D7A87 !important;">N-Deavourservices</div>'
+                f'<div class="nd-nav-tagline" style="color: #64748B !important;">Excellence through efficiency</div></div></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<h3 style="text-align: center; color: #0D7A87 !important; margin-bottom: 1.5rem;">Forgot Password</h3>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                '<p style="text-align: center; color: #64748B !important; font-size: 0.95rem; margin-bottom: 2rem;">'
+                'Enter your registered email address below. If an account exists, we will send you a secure password reset link valid for 15 minutes.</p>',
+                unsafe_allow_html=True
+            )
+            
+            with st.form("forgot_password_form"):
+                email = st.text_input("Email Address", placeholder="Enter your email address")
+                submitted = st.form_submit_button("Send Reset Link", use_container_width=True)
+                
+                if submitted:
+                    if not email:
+                        st.error("Please enter your email address.")
+                    else:
+                        success, result = auth_store.generate_reset_token(email)
+                        if success:
+                            # Get the username associated with this email
+                            users = auth_store._read_users()
+                            username = "User"
+                            for u, data in users.items():
+                                if data.get("email", "").strip().lower() == email.strip().lower():
+                                    username = u
+                                    break
+                            
+                            # Dispatch email
+                            mail_success, mail_msg = send_reset_email(email, username, result)
+                            if mail_success:
+                                st.success("A secure password reset link has been sent to your email address.")
+                            else:
+                                st.info(mail_msg)
+                                
+                            # Transition to enter token view
+                            st.session_state.auth_view = "enter_token"
+                            st.session_state.reset_email = email
+                            _status("Reset token generated successfully.")
+                            st.rerun()
+                        else:
+                            st.error(result)
+            
+            if st.button("Back to Login", use_container_width=True):
+                st.session_state.auth_view = "login"
+                st.rerun()
+        return False
+
+    if st.session_state.get("auth_view") == "enter_token":
+        # Inject custom N-Deavour light mode CSS
+        st.markdown(
+            """
+            <style>
+            .stApp {
+                background-color: #F8FAFC !important;
+                background-image: none !important;
+                color: #0F172A !important;
+            }
+            h1, h2, h3, h4, h5, h6, p, label, span, div, li {
+                color: #0F172A !important;
+            }
+            div[data-testid="stForm"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                border-radius: 0.85rem !important;
+                padding: 2.5rem !important;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03) !important;
+            }
+            input, textarea, select {
+                background-color: #FFFFFF !important;
+                color: #0F172A !important;
+                border: 1px solid #CBD5E1 !important;
+                border-radius: 0.55rem !important;
+            }
+            input:focus {
+                border-color: #0D7A87 !important;
+                box-shadow: 0 0 0 2px rgba(13, 122, 135, 0.2) !important;
+            }
+            .stButton>button, .stFormSubmitButton>button {
+                background-color: #0D7A87 !important;
+                color: #FFFFFF !important;
+                border: 1px solid #0D7A87 !important;
+                border-radius: 0.55rem !important;
+                font-weight: 700 !important;
+                transition: all 0.2s ease !important;
+            }
+            .stButton>button:hover, .stFormSubmitButton>button:hover {
+                background-color: #0A5C66 !important;
+                border-color: #0A5C66 !important;
+                color: #FFFFFF !important;
+                box-shadow: 0 4px 12px rgba(13, 122, 135, 0.35) !important;
+                transform: translateY(-1px) !important;
+            }
+            div[data-testid="stAlert"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                color: #0F172A !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
+        with col2:
+            _divider_space(2.0)
+            st.markdown(
+                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
+                f'<div><div class="nd-nav-wordmark" style="color: #0D7A87 !important;">N-Deavourservices</div>'
+                f'<div class="nd-nav-tagline" style="color: #64748B !important;">Excellence through efficiency</div></div></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<h3 style="text-align: center; color: #0D7A87 !important; margin-bottom: 1.5rem;">Verify Reset Token</h3>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f'<p style="text-align: center; color: #64748B !important; font-size: 0.95rem; margin-bottom: 2rem;">'
+                f'We sent a reset link to <strong>{st.session_state.get("reset_email", "your email")}</strong>. '
+                f'You can click that link or manually enter the secure recovery token below.</p>',
+                unsafe_allow_html=True
+            )
+            
+            with st.form("enter_token_form"):
+                token = st.text_input("Secure Recovery Token", placeholder="Paste your alphanumeric token here")
+                submitted = st.form_submit_button("Verify Token", use_container_width=True)
+                
+                if submitted:
+                    if not token:
+                        st.error("Please enter the recovery token.")
+                    else:
+                        success, result = auth_store.verify_reset_token(token)
+                        if success:
+                            st.session_state.auth_view = "reset_password"
+                            st.session_state.reset_token = token
+                            st.success(f"Token verified for user '{result}'.")
+                            st.rerun()
+                        else:
+                            st.error(result)
+            
+            if st.button("Back to Login", use_container_width=True):
+                st.session_state.auth_view = "login"
+                st.rerun()
+        return False
+
+    if st.session_state.get("auth_view") == "reset_password":
+        # Inject custom N-Deavour light mode CSS
+        st.markdown(
+            """
+            <style>
+            .stApp {
+                background-color: #F8FAFC !important;
+                background-image: none !important;
+                color: #0F172A !important;
+            }
+            h1, h2, h3, h4, h5, h6, p, label, span, div, li {
+                color: #0F172A !important;
+            }
+            div[data-testid="stForm"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                border-radius: 0.85rem !important;
+                padding: 2.5rem !important;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03) !important;
+            }
+            input, textarea, select {
+                background-color: #FFFFFF !important;
+                color: #0F172A !important;
+                border: 1px solid #CBD5E1 !important;
+                border-radius: 0.55rem !important;
+            }
+            input:focus {
+                border-color: #0D7A87 !important;
+                box-shadow: 0 0 0 2px rgba(13, 122, 135, 0.2) !important;
+            }
+            .stButton>button, .stFormSubmitButton>button {
+                background-color: #0D7A87 !important;
+                color: #FFFFFF !important;
+                border: 1px solid #0D7A87 !important;
+                border-radius: 0.55rem !important;
+                font-weight: 700 !important;
+                transition: all 0.2s ease !important;
+            }
+            .stButton>button:hover, .stFormSubmitButton>button:hover {
+                background-color: #0A5C66 !important;
+                border-color: #0A5C66 !important;
+                color: #FFFFFF !important;
+                box-shadow: 0 4px 12px rgba(13, 122, 135, 0.35) !important;
+                transform: translateY(-1px) !important;
+            }
+            div[data-testid="stAlert"] {
+                background-color: #FFFFFF !important;
+                border: 1px solid #E2E8F0 !important;
+                color: #0F172A !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        token = st.session_state.get("reset_token", "")
+        success, result = auth_store.verify_reset_token(token)
+        
+        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
+        with col2:
+            _divider_space(2.0)
+            st.markdown(
+                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
+                f'<div><div class="nd-nav-wordmark" style="color: #0D7A87 !important;">N-Deavourservices</div>'
+                f'<div class="nd-nav-tagline" style="color: #64748B !important;">Excellence through efficiency</div></div></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<h3 style="text-align: center; color: #0D7A87 !important; margin-bottom: 1.5rem;">Reset Password</h3>',
+                unsafe_allow_html=True
+            )
+            
+            if not success:
+                st.error(f"Verification failed: {result}")
+                if st.button("Back to Login", use_container_width=True):
+                    # Clear query parameters and state
+                    st.query_params.clear()
+                    st.session_state.auth_view = "login"
+                    st.session_state.pop("reset_token", None)
+                    st.rerun()
+            else:
+                st.markdown(
+                    f'<p style="text-align: center; color: #64748B !important; font-size: 0.95rem; margin-bottom: 2rem;">'
+                    f'Resetting password for user: <strong>{result}</strong></p>',
+                    unsafe_allow_html=True
+                )
+                
+                with st.form("reset_password_form"):
+                    new_password = st.text_input("New Password", type="password", placeholder="At least 6 characters")
+                    confirm_password = st.text_input("Confirm New Password", type="password", placeholder="Repeat new password")
+                    submitted = st.form_submit_button("Reset Password", use_container_width=True)
+                    
+                    if submitted:
+                        if not new_password or not confirm_password:
+                            st.error("Please fill in all fields.")
+                        elif new_password != confirm_password:
+                            st.error("Passwords do not match.")
+                        else:
+                            reset_success, reset_msg = auth_store.reset_password_with_token(token, new_password)
+                            if reset_success:
+                                st.success("Your password has been successfully reset. Redirecting to login...")
+                                _status("Password reset successful.")
+                                # Clear query parameters and state
+                                st.query_params.clear()
+                                st.session_state.auth_view = "login"
+                                st.session_state.pop("reset_token", None)
+                                st.session_state.pop("reset_email", None)
+                                st.rerun()
+                            else:
+                                st.error(reset_msg)
+                                
+                if st.button("Cancel", use_container_width=True):
+                    # Clear query parameters and state
+                    st.query_params.clear()
+                    st.session_state.auth_view = "login"
+                    st.session_state.pop("reset_token", None)
+                    st.rerun()
+        return False
 
     # Layout for centering authentication container
     col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
@@ -208,6 +543,13 @@ def render_auth_flow() -> bool:
                         else:
                             # result_auth is a string error message on authentication failure (e.g. Invalid username or password)
                             st.error(str(result_auth))
+
+            # Forgot Password link
+            st.markdown('<div style="text-align: center; margin-top: 1rem;">', unsafe_allow_html=True)
+            if st.button("Forgot Password?", key="forgot_password_btn", use_container_width=True):
+                st.session_state.auth_view = "forgot_password"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
 
         with tab_register:
             st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
