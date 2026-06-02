@@ -555,17 +555,18 @@ def render_auth_flow() -> bool:
             st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
             with st.form("register_form"):
                 reg_username = st.text_input("Username", key="reg_username", placeholder="3-20 characters, alphanumeric/underscores")
+                reg_email = st.text_input("Email Address", key="reg_email", placeholder="e.g. user@example.com")
                 reg_password = st.text_input("Password", key="reg_password", type="password", placeholder="At least 6 characters")
                 reg_confirm = st.text_input("Confirm Password", key="reg_confirm", type="password", placeholder="Repeat password")
                 reg_submitted = st.form_submit_button("Register", use_container_width=True)
 
                 if reg_submitted:
-                    if not reg_username or not reg_password or not reg_confirm:
+                    if not reg_username or not reg_email or not reg_password or not reg_confirm:
                         st.error("Please fill in all fields.")
                     elif reg_password != reg_confirm:
                         st.error("Passwords do not match.")
                     else:
-                        success, message = auth_store.register(reg_username, reg_password)
+                        success, message = auth_store.register(reg_username, reg_password, reg_email)
                         if success:
                             # Registration successful, now authenticate to get profile metadata
                             auth_success, result_auth = auth_store.authenticate(reg_username, reg_password)
@@ -2133,15 +2134,16 @@ def render_admin_dashboard() -> None:
 
         with st.form("admin_add_user_form", clear_on_submit=True):
             new_username = st.text_input("Username", placeholder="3-20 characters, alphanumeric/underscores")
+            new_email = st.text_input("Email Address", placeholder="e.g. user@example.com")
             new_password = st.text_input("Password", type="password", placeholder="At least 6 characters")
             new_role = st.selectbox("Assign Account Role", options=["Standard User", "Administrator"])
             submit_add = st.form_submit_button("Register Team Account", use_container_width=True)
 
             if submit_add:
-                if not new_username or not new_password:
+                if not new_username or not new_email or not new_password:
                     st.error("All credential fields are required.")
                 else:
-                    success, msg = auth_store.register(new_username, new_password, role=new_role)
+                    success, msg = auth_store.register(new_username, new_password, new_email, role=new_role)
                     if success:
                         st.success(f"Successfully registered account for '{new_username}' with '{new_role}' role!")
                         _status(f"Registered user: {new_username}")
