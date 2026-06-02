@@ -160,182 +160,6 @@ def render_auth_flow() -> bool:
 
     from storage_bridge import AuthStore, StorageBridge
     auth_store = AuthStore()
-    from utils.mailer import send_reset_email
-
-    # Check for reset token in URL query parameters
-    if "token" in st.query_params:
-        st.session_state.auth_view = "reset_password"
-        st.session_state.reset_token = st.query_params["token"]
-
-    # Route to forgot password or reset password views if requested
-    if st.session_state.get("auth_view") == "forgot_password":
-        
-        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
-        with col2:
-            _divider_space(2.0)
-            st.markdown(
-                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
-                f'<div><div class="nd-nav-wordmark">N-Deavourservices</div>'
-                f'<div class="nd-nav-tagline">Excellence through efficiency</div></div></div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<h3 class="nd-auth-heading">Forgot Password</h3>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                '<p class="nd-auth-subtitle">'
-                'Enter your registered email address below. If an account exists, we will send you a secure password reset link valid for 15 minutes.</p>',
-                unsafe_allow_html=True
-            )
-            
-            with st.form("forgot_password_form"):
-                email = st.text_input("Email Address", placeholder="Enter your email address")
-                submitted = st.form_submit_button("Send Reset Link", use_container_width=True)
-                
-                if submitted:
-                    if not email:
-                        st.error("Please enter your email address.")
-                    else:
-                        success, result = auth_store.generate_reset_token(email)
-                        if success:
-                            # Get the username associated with this email
-                            users = auth_store._read_users()
-                            username = "User"
-                            for u, data in users.items():
-                                if data.get("email", "").strip().lower() == email.strip().lower():
-                                    username = u
-                                    break
-                            
-                            # Dispatch email
-                            mail_success, mail_msg = send_reset_email(email, username, result)
-                            if mail_success:
-                                st.success("A secure password reset link has been sent to your email address.")
-                            else:
-                                st.info(mail_msg)
-                                
-                            # Transition to enter token view
-                            st.session_state.auth_view = "enter_token"
-                            st.session_state.reset_email = email
-                            _status("Reset token generated successfully.")
-                            st.rerun()
-                        else:
-                            st.error(result)
-            
-            if st.button("Back to Login", use_container_width=True):
-                st.session_state.auth_view = "login"
-                st.rerun()
-        return False
-
-    if st.session_state.get("auth_view") == "enter_token":
-        
-        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
-        with col2:
-            _divider_space(2.0)
-            st.markdown(
-                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
-                f'<div><div class="nd-nav-wordmark">N-Deavourservices</div>'
-                f'<div class="nd-nav-tagline">Excellence through efficiency</div></div></div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<h3 class="nd-auth-heading">Verify Reset Token</h3>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f'<p class="nd-auth-subtitle">'
-                f'We sent a reset link to <strong>{st.session_state.get("reset_email", "your email")}</strong>. '
-                f'You can click that link or manually enter the secure recovery token below.</p>',
-                unsafe_allow_html=True
-            )
-            
-            with st.form("enter_token_form"):
-                token = st.text_input("Secure Recovery Token", placeholder="Paste your alphanumeric token here")
-                submitted = st.form_submit_button("Verify Token", use_container_width=True)
-                
-                if submitted:
-                    if not token:
-                        st.error("Please enter the recovery token.")
-                    else:
-                        success, result = auth_store.verify_reset_token(token)
-                        if success:
-                            st.session_state.auth_view = "reset_password"
-                            st.session_state.reset_token = token
-                            st.success(f"Token verified for user '{result}'.")
-                            st.rerun()
-                        else:
-                            st.error(result)
-            
-            if st.button("Back to Login", use_container_width=True):
-                st.session_state.auth_view = "login"
-                st.rerun()
-        return False
-
-    if st.session_state.get("auth_view") == "reset_password":
-        
-        token = st.session_state.get("reset_token", "")
-        success, result = auth_store.verify_reset_token(token)
-        
-        col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
-        with col2:
-            _divider_space(2.0)
-            st.markdown(
-                f'<div class="nd-nav-brand" style="justify-content: center; margin-bottom: 1.5rem;">{_NAV_SVG}'
-                f'<div><div class="nd-nav-wordmark">N-Deavourservices</div>'
-                f'<div class="nd-nav-tagline">Excellence through efficiency</div></div></div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<h3 class="nd-auth-heading">Reset Password</h3>',
-                unsafe_allow_html=True
-            )
-            
-            if not success:
-                st.error(f"Verification failed: {result}")
-                if st.button("Back to Login", use_container_width=True):
-                    # Clear query parameters and state
-                    st.query_params.clear()
-                    st.session_state.auth_view = "login"
-                    st.session_state.pop("reset_token", None)
-                    st.rerun()
-            else:
-                st.markdown(
-                    f'<p class="nd-auth-subtitle">'
-                    f'Resetting password for user: <strong>{result}</strong></p>',
-                    unsafe_allow_html=True
-                )
-                
-                with st.form("reset_password_form"):
-                    new_password = st.text_input("New Password", type="password", placeholder="At least 6 characters")
-                    confirm_password = st.text_input("Confirm New Password", type="password", placeholder="Repeat new password")
-                    submitted = st.form_submit_button("Reset Password", use_container_width=True)
-                    
-                    if submitted:
-                        if not new_password or not confirm_password:
-                            st.error("Please fill in all fields.")
-                        elif new_password != confirm_password:
-                            st.error("Passwords do not match.")
-                        else:
-                            reset_success, reset_msg = auth_store.reset_password_with_token(token, new_password)
-                            if reset_success:
-                                st.success("Your password has been successfully reset. Redirecting to login...")
-                                _status("Password reset successful.")
-                                # Clear query parameters and state
-                                st.query_params.clear()
-                                st.session_state.auth_view = "login"
-                                st.session_state.pop("reset_token", None)
-                                st.session_state.pop("reset_email", None)
-                                st.rerun()
-                            else:
-                                st.error(reset_msg)
-                                
-                if st.button("Cancel", use_container_width=True):
-                    # Clear query parameters and state
-                    st.query_params.clear()
-                    st.session_state.auth_view = "login"
-                    st.session_state.pop("reset_token", None)
-                    st.rerun()
-        return False
 
     # Layout for centering authentication container
     col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
@@ -348,7 +172,8 @@ def render_auth_flow() -> bool:
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<div class="nd-auth-subtitle">Secure Multi-User Financial Agent Workspace</div>',
+            '<div style="text-align: center; color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem;">'
+            'Secure Multi-User Financial Agent Workspace</div>',
             unsafe_allow_html=True,
         )
 
@@ -384,29 +209,21 @@ def render_auth_flow() -> bool:
                             # result_auth is a string error message on authentication failure (e.g. Invalid username or password)
                             st.error(str(result_auth))
 
-            # Forgot Password link
-            st.markdown('<div style="text-align: center; margin-top: 1rem;">', unsafe_allow_html=True)
-            if st.button("Forgot Password?", key="forgot_password_btn", use_container_width=True):
-                st.session_state.auth_view = "forgot_password"
-                st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
-
         with tab_register:
             st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
             with st.form("register_form"):
                 reg_username = st.text_input("Username", key="reg_username", placeholder="3-20 characters, alphanumeric/underscores")
-                reg_email = st.text_input("Email Address", key="reg_email", placeholder="e.g. user@example.com")
                 reg_password = st.text_input("Password", key="reg_password", type="password", placeholder="At least 6 characters")
                 reg_confirm = st.text_input("Confirm Password", key="reg_confirm", type="password", placeholder="Repeat password")
                 reg_submitted = st.form_submit_button("Register", use_container_width=True)
 
                 if reg_submitted:
-                    if not reg_username or not reg_email or not reg_password or not reg_confirm:
+                    if not reg_username or not reg_password or not reg_confirm:
                         st.error("Please fill in all fields.")
                     elif reg_password != reg_confirm:
                         st.error("Passwords do not match.")
                     else:
-                        success, message = auth_store.register(reg_username, reg_password, reg_email)
+                        success, message = auth_store.register(reg_username, reg_password)
                         if success:
                             # Registration successful, now authenticate to get profile metadata
                             auth_success, result_auth = auth_store.authenticate(reg_username, reg_password)
@@ -605,145 +422,153 @@ def format_usd(amount: float) -> str:
 
 _CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;600&display=swap');
 :root {
-    --nd-deep-purple: #0a0514;
-    --nd-lavender: #d8b4fe;
-    --nd-indigo: #4f46e5;
-    --bg: var(--nd-deep-purple);
-    --surface: rgba(10, 5, 20, 0.55);
-    --card: rgba(15, 8, 29, 0.72);
-    --border: rgba(255, 255, 255, 0.05);
-    --border-hi: rgba(216, 180, 254, 0.3);
-    --ink: #ffffff;
-    --muted: #9ca3af;
-    --subtle: rgba(216, 180, 254, 0.6);
-    --accent: var(--nd-lavender);
-    --brand: var(--nd-indigo);
-    --pos: #a7f3d0;
-    --neg: #fca5a5;
-    --warn: #fde68a;
-    --radius: 9999px;
-    --radius-sm: 0.55rem;
-    --radius-card: 0.85rem;
-    --ease-ethereal: cubic-bezier(0.16, 1, 0.3, 1);
+    --bg:       #09041A;
+    --surface:  #110826;
+    --card:     #170E30;
+    --border:   #2E2148;
+    --border-hi:#463368;
+    --ink:      #F6ECFF;
+    --muted:    #C4B8DF;
+    --subtle:   #8679A4;
+    --accent:   #E0D6F8;
+    --brand:    #8679A4;
+    --pos:      #A7F3D0;
+    --neg:      #FCA5A5;
+    --warn:     #FDE68A;
+    --radius:   0.85rem;
+    --radius-sm:0.55rem;
 }
-html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
-.stApp { background-color: var(--bg); color: var(--ink); overflow-x: hidden; }
-.stApp > header { background: rgba(10, 5, 20, 0.2) !important; backdrop-filter: blur(24px); border-bottom: 1px solid rgba(255,255,255,0.05); }
-.block-container { max-width: 80rem; padding: 2.25rem 2rem 4rem; position: relative; z-index: 1; }
-h1,h2,h3,h4,h5,h6 { color: var(--ink); font-weight: 200; letter-spacing: -0.02em; }
-p,li,label,span,td,th { color: var(--ink); }
-[data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--border); backdrop-filter: blur(16px); }
-[data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span { color: var(--muted); }
-.nd-nebula-bg { position: fixed; inset: -50%; width: 200%; height: 200%;
-  background: radial-gradient(circle at 30% 40%, rgba(79,70,229,0.15) 0%, transparent 40%),
-    radial-gradient(circle at 70% 60%, rgba(216,180,254,0.12) 0%, transparent 40%),
-    radial-gradient(circle at 50% 50%, rgba(15,8,29,1) 0%, rgba(10,5,20,1) 100%);
-  z-index: 0; pointer-events: none; animation: nd-nebula-shift 25s ease-in-out infinite alternate; }
-@keyframes nd-nebula-shift { 0%{transform:scale(1) translate(0,0);opacity:.4} 50%{transform:scale(1.2) translate(5%,2%);opacity:.6} 100%{transform:scale(1.1) translate(-2%,-5%);opacity:.4} }
-.nd-sculpture-wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; opacity: .3; pointer-events: none; z-index: 0; perspective: 1200px; }
-.nd-sculpture-wrap svg { width: min(80vh,80vw); height: min(80vh,80vw); color: var(--nd-lavender); animation: nd-slow-spin 120s linear infinite; }
-@keyframes nd-slow-spin { to { transform: rotate(360deg); } }
-.nd-sculpture-line { stroke-dasharray: 1000; stroke-dashoffset: 1000; animation: nd-draw 10s ease-out forwards; }
-@keyframes nd-draw { to { stroke-dashoffset: 0; } }
-.nd-thin-stroke { stroke-width: 0.15; }
-.nd-nav-brand { align-items: center; display: flex; gap: 1rem; flex-shrink: 0; color: var(--nd-lavender); }
-.nd-nav-wordmark { color: var(--ink); font-size: 1.125rem; font-weight: 300; letter-spacing: 0.3em; text-transform: uppercase; line-height: 1; }
-.nd-nav-tagline { color: rgba(216,180,254,0.6); font-size: 0.5625rem; letter-spacing: 0.4em; text-transform: uppercase; margin-top: 0.25rem; }
-.nd-nav-page { color: var(--muted); font-size: 0.625rem; font-weight: 500; letter-spacing: 0.4em; text-transform: uppercase; }
-.nd-auth-heading { color: var(--ink); font-size: 1.5rem; font-weight: 200; letter-spacing: 0.05em; margin-bottom: 0.5rem; text-align: center; }
-.nd-auth-subtitle { color: var(--muted); font-size: 0.95rem; font-weight: 300; letter-spacing: 0.05em; line-height: 1.65; margin-bottom: 2rem; opacity: 0.8; text-align: center; }
-.nd-section { border-top: 1px solid var(--border); margin: 2.5rem 0 1.25rem; padding-top: 1.5rem; }
-.nd-section-eyebrow { color: var(--nd-lavender); font-size: 0.5625rem; font-weight: 500; letter-spacing: 0.5em; text-transform: uppercase; margin-bottom: 0.35rem; }
-.nd-section-title { color: var(--ink); font-size: clamp(1.5rem,3vw,1.875rem); font-weight: 200; letter-spacing: -0.02em; line-height: 1.15; margin: 0; }
-.nd-section-body { color: var(--muted); font-size: 1rem; font-weight: 300; letter-spacing: 0.05em; line-height: 1.65; margin: 0.5rem 0 0; max-width: 680px; opacity: 0.8; }
-.nd-metric { background: var(--card); border: 1px solid var(--border-hi); border-radius: var(--radius-card); padding: 1.1rem 1.15rem 1.2rem; backdrop-filter: blur(8px); }
-.nd-metric-label { color: var(--subtle); font-size: 0.5625rem; font-weight: 500; letter-spacing: 0.5em; text-transform: uppercase; margin-bottom: 0.6rem; }
-.nd-metric-value { color: var(--nd-lavender); font-size: clamp(1.35rem,2.2vw,1.9rem); font-weight: 300; letter-spacing: -0.04em; line-height: 1; }
-.nd-metric-value.pos { color: var(--pos); } .nd-metric-value.neg { color: var(--neg); }
-.nd-registry-row { background: var(--card); border: 1px solid var(--border-hi); border-radius: var(--radius-card); margin-bottom: 0.55rem; padding: 0.85rem 1rem; backdrop-filter: blur(8px); }
-.nd-registry-name { color: var(--ink); font-weight: 400; font-size: 0.95rem; }
-.nd-registry-meta { color: var(--muted); font-size: 0.78rem; line-height: 1.8; font-weight: 300; }
-.nd-badge { background: rgba(167,243,208,0.14); border: 1px solid rgba(167,243,208,0.3); border-radius: 999px; color: var(--pos); font-size: 0.5625rem; letter-spacing: 0.4em; padding: 0.2rem 0.55rem; text-transform: uppercase; display: inline-block; }
-.nd-badge-warn { background: rgba(253,230,138,0.12); border-color: rgba(253,230,138,0.28); color: var(--warn); }
-.nd-note { color: var(--muted); font-size: 0.92rem; font-weight: 300; line-height: 1.65; margin: 0.4rem 0 1rem; }
-.stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-  background: transparent !important; border: 1px solid rgba(216,180,254,0.3) !important; border-radius: var(--radius) !important;
-  color: var(--ink) !important; font-weight: 300 !important; font-size: 0.6875rem !important; letter-spacing: 0.3em !important;
-  min-height: 2.75rem; padding: 0 1.5rem !important; text-transform: uppercase; backdrop-filter: blur(8px);
-  transition: all 0.6s var(--ease-ethereal) !important; }
-.stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
-  background: rgba(216,180,254,0.1) !important; border-color: rgba(216,180,254,0.8) !important;
-  box-shadow: 0 0 30px rgba(216,180,254,0.15) !important; transform: translateY(-2px) !important; }
-div[data-testid="stPopover"] button { background: var(--surface) !important; border: 1px solid var(--border-hi) !important;
-  border-radius: var(--radius) !important; color: var(--nd-lavender) !important; font-weight: 300 !important;
-  font-size: 0.625rem !important; letter-spacing: 0.2em !important; text-transform: uppercase; min-height: 2.6rem; min-width: 5.5rem; }
-button[data-baseweb="tab"] { color: var(--muted) !important; font-size: 0.625rem !important; letter-spacing: 0.2em !important; text-transform: uppercase; }
-button[data-baseweb="tab"][aria-selected="true"] { color: var(--nd-lavender) !important; border-color: rgba(216,180,254,0.4) !important; }
-div[data-testid="stExpander"], div[data-testid="stFileUploader"], .stChatMessage, div[data-testid="stAlert"] {
-  background: var(--card); border: 1px solid var(--border-hi); border-radius: var(--radius-card); backdrop-filter: blur(8px); }
-div[data-testid="stFileUploader"] { border-style: dashed; padding: 0.5rem; margin-bottom: 0.75rem; }
-div[data-testid="stExpander"] { margin-bottom: 0.75rem; }
-div[data-testid="stExpander"] details summary p { color: var(--ink); font-weight: 300; }
-div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] { border: 1px solid var(--border-hi); border-radius: var(--radius-card); overflow: hidden; }
-.stChatMessage { margin-bottom: 0.5rem; padding: 0.75rem; }
-input, textarea, select, div[data-baseweb="select"], div[data-baseweb="input"] {
-  min-height: 2.5rem; background-color: rgba(10,5,20,0.5) !important; border-color: rgba(216,180,254,0.2) !important; color: var(--ink) !important; }
-input::placeholder, textarea::placeholder { color: var(--muted) !important; }
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
-  outline: 3px solid rgba(216,180,254,0.6) !important; outline-offset: 3px !important; }
-.nd-metric, div[data-testid="stFileUploader"], div[data-testid="stExpander"], .nd-registry-row,
-div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
-  transition: border-color 0.6s var(--ease-ethereal), box-shadow 0.6s var(--ease-ethereal), background-color 0.6s var(--ease-ethereal) !important; }
-.nd-metric:hover, div[data-testid="stFileUploader"]:hover, div[data-testid="stExpander"]:hover, .nd-registry-row:hover,
-div[data-testid="stDataFrame"]:hover, div[data-testid="stDataEditor"]:hover {
-  border-color: rgba(216,180,254,0.8) !important; box-shadow: 0 0 30px rgba(216,180,254,0.15) !important;
-  background-color: rgba(216,180,254,0.05) !important; }
-.sr-only { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
-a.skip-link { background: rgba(216,180,254,0.15); border: 1px solid rgba(216,180,254,0.4); border-radius: var(--radius);
-  color: var(--ink); font-weight: 300; letter-spacing: 0.2em; padding: 0.65rem 1rem; position: absolute; text-transform: uppercase; top: -5rem; left: 1rem; z-index: 9999; }
-a.skip-link:focus { top: 1rem; }
-.vega-embed .marks { background: transparent !important; }
-@media (max-width: 640px) { .block-container { padding: 1rem 1rem 3rem; } .nd-nav-wordmark { font-size: 1rem; letter-spacing: 0.2em; } }
-</style>
-"""
+.stApp {
+    background:
+        radial-gradient(ellipse 80% 40% at 15% -10%, rgba(134,121,164,.20), transparent),
+        radial-gradient(ellipse 60% 30% at 90%  5%, rgba(224,214,248,.07), transparent),
+        var(--bg);
+    color: var(--ink);
+}
+.block-container { max-width:1180px; padding:2.25rem 2.5rem 4rem; }
+h1,h2,h3,h4,h5,h6 { color:var(--ink); letter-spacing:-0.03em; }
+p,li,label,span,td,th { color:var(--ink); }
+[data-testid="stSidebar"] {
+    background:var(--surface);
+    border-right:1px solid var(--border);
+}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span { color:var(--muted); }
 
-_AMBIENT_HTML = """
-<div class="nd-ambient-root" aria-hidden="true" style="position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none;">
-  <div class="nd-nebula-bg" id="nd-nebula"></div>
-  <div class="nd-sculpture-wrap" id="nd-sculpture">
-    <svg fill="none" stroke="currentColor" viewBox="0 0 100 100">
-      <g class="nd-thin-stroke">
-        <path class="nd-sculpture-line" d="M50 2 L95 35 L78 90 L22 90 L5 35 Z"></path>
-        <path class="nd-sculpture-line" d="M50 2 L50 35 L95 35"></path>
-        <path class="nd-sculpture-line" d="M50 35 L78 90"></path>
-        <path class="nd-sculpture-line" d="M50 35 L22 90"></path>
-        <path class="nd-sculpture-line" d="M50 35 L5 35"></path>
-        <path class="nd-sculpture-line" d="M50 2 L78 90"></path>
-        <path class="nd-sculpture-line" d="M78 90 L5 35"></path>
-        <path class="nd-sculpture-line" d="M5 35 L95 35"></path>
-        <path class="nd-sculpture-line" d="M95 35 L22 90"></path>
-        <path class="nd-sculpture-line" d="M22 90 L50 2"></path>
-        <circle cx="50" cy="50" r="48" stroke-dasharray="0.5 2" stroke-opacity="0.2"></circle>
-        <circle cx="50" cy="50" r="20" stroke-opacity="0.1"></circle>
-      </g>
-    </svg>
-  </div>
-</div>
-<script>
-(function () {
-  var doc = window.parent && window.parent.document ? window.parent.document : document;
-  doc.addEventListener('mousemove', function (e) {
-    var x = (e.clientX / window.innerWidth) - 0.5;
-    var y = (e.clientY / window.innerHeight) - 0.5;
-    var nebula = doc.getElementById('nd-nebula');
-    if (nebula) { nebula.style.transform = 'scale(1.1) translate(' + (x * -2) + '%, ' + (y * -2) + '%)'; }
-    var sculpture = doc.getElementById('nd-sculpture');
-    if (sculpture) { sculpture.style.transform = 'translate(' + (x * 20) + 'px, ' + (y * 20) + 'px)'; }
-  });
-})();
-</script>
+/* ── Nav ────────────── */
+.nd-nav-brand { align-items:center; display:flex; gap:0.7rem; flex-shrink:0; }
+.nd-nav-wordmark { color:var(--accent); font-size:1.15rem; font-weight:800; letter-spacing:-0.04em; line-height:1; }
+.nd-nav-tagline  { color:var(--subtle); font-size:0.72rem; font-weight:600; letter-spacing:0.04em; line-height:1; margin-top:0.2rem; text-transform:uppercase; }
+.nd-nav-page     { color:var(--subtle); font-size:0.8rem; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; }
+
+/* ── Section headings ── */
+.nd-section { border-top:1px solid var(--border); margin:2.5rem 0 1.25rem; padding-top:1.5rem; }
+.nd-section-eyebrow { color:var(--accent); font-size:0.72rem; font-weight:800; letter-spacing:0.16em; margin-bottom:0.35rem; text-transform:uppercase; }
+.nd-section-title   { color:var(--ink); font-size:1.45rem; font-weight:700; letter-spacing:-0.035em; line-height:1.1; margin:0; }
+.nd-section-body    { color:var(--muted); font-size:0.95rem; line-height:1.65; margin:0.5rem 0 0; max-width:680px; }
+
+/* ── KPI tiles ─────── */
+.nd-metric         { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:1.1rem 1.15rem 1.2rem; }
+.nd-metric-label   { color:var(--subtle); font-size:0.72rem; font-weight:800; letter-spacing:0.12em; margin-bottom:0.6rem; text-transform:uppercase; }
+.nd-metric-value   { color:var(--accent); font-size:clamp(1.35rem,2.2vw,1.9rem); font-weight:750; letter-spacing:-0.04em; line-height:1; }
+.nd-metric-value.pos { color:var(--pos); }
+.nd-metric-value.neg { color:var(--neg); }
+
+/* ── Registry table row ── */
+.nd-registry-row   { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:0.55rem; padding:0.85rem 1rem; }
+.nd-registry-name  { color:var(--ink); font-weight:700; font-size:0.95rem; }
+.nd-registry-meta  { color:var(--subtle); font-size:0.78rem; line-height:1.8; }
+.nd-badge          { background:rgba(167,243,208,0.14); border:1px solid rgba(167,243,208,0.30); border-radius:999px; color:var(--pos); display:inline-block; font-size:0.68rem; font-weight:800; letter-spacing:0.10em; padding:0.2rem 0.55rem; text-transform:uppercase; vertical-align:middle; }
+.nd-badge-warn     { background:rgba(253,230,138,0.12); border-color:rgba(253,230,138,0.28); color:var(--warn); }
+
+/* ── Note ──────────── */
+.nd-note { color:var(--muted); font-size:0.92rem; line-height:1.65; margin:0.4rem 0 1rem; }
+
+/* ── Buttons ────────── */
+.stButton>button,
+.stDownloadButton>button,
+.stFormSubmitButton>button {
+    background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius-sm);
+    color:#170431; font-weight:800; min-height:2.6rem; padding:0 1.1rem;
+}
+.stButton>button:hover,
+.stDownloadButton>button:hover,
+.stFormSubmitButton>button:hover {
+    background:var(--ink); border-color:var(--ink); color:#170431;
+}
+
+/* ── Popover (menu) ── */
+div[data-testid="stPopover"] button {
+    background:var(--surface) !important; border:1px solid var(--border-hi) !important;
+    border-radius:var(--radius-sm) !important; color:var(--accent) !important;
+    font-weight:800 !important; min-height:2.6rem; min-width:5.5rem;
+}
+
+/* ── Expanders ─────── */
+div[data-testid="stExpander"] { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:0.75rem; }
+div[data-testid="stExpander"] details summary p { color:var(--ink); font-weight:700; }
+
+/* ── File uploader ─── */
+div[data-testid="stFileUploader"] { background:var(--card); border:1px dashed var(--border-hi); border-radius:var(--radius); padding:0.5rem; }
+
+/* ── Data tables ───── */
+div[data-testid="stDataFrame"],
+div[data-testid="stDataEditor"] { border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+
+/* ── Chat ──────────── */
+.stChatMessage { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:0.5rem; padding:0.75rem; }
+
+/* ── Inputs ─────────── */
+input,textarea,select,
+div[data-baseweb="select"],
+div[data-baseweb="input"] { min-height:2.5rem; }
+
+/* ── Focus (WCAG 2.2) ─ */
+button:focus-visible,a:focus-visible,
+input:focus-visible,textarea:focus-visible,
+[tabindex]:focus-visible { outline:3px solid var(--accent) !important; outline-offset:3px !important; }
+
+/* ── Elegant Hover Micro-Interactions ── */
+.nd-metric, div[data-testid="stFileUploader"], div[data-testid="stExpander"], .nd-registry-row, div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
+    transition: border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+.nd-metric:hover, div[data-testid="stFileUploader"]:hover, div[data-testid="stExpander"]:hover, .nd-registry-row:hover, div[data-testid="stDataFrame"]:hover, div[data-testid="stDataEditor"]:hover {
+    border-color: #0D7A87 !important;
+    box-shadow: 0 0 12px rgba(13, 122, 135, 0.2) !important;
+    background-color: rgba(13, 122, 135, 0.03) !important;
+}
+.stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
+    transition: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
+}
+.stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
+    transform: translateY(-1px) !important;
+    border-color: #0D7A87 !important;
+    background-color: #0D7A87 !important;
+    color: #FFFFFF !important;
+    box-shadow: 0 4px 12px rgba(13, 122, 135, 0.3) !important;
+}
+
+/* ── Alerts ─────────── */
+div[data-testid="stAlert"] { background:var(--card); border:1px solid var(--border-hi); border-radius:var(--radius-sm); }
+
+/* ── SR-only ─────────── */
+.sr-only { clip:rect(0 0 0 0); clip-path:inset(50%); height:1px; overflow:hidden; position:absolute; white-space:nowrap; width:1px; }
+
+/* ── Skip link ────────── */
+a.skip-link { background:var(--accent); border-radius:var(--radius-sm); color:#170431; font-weight:800; left:1rem; padding:0.65rem 1rem; position:absolute; top:-5rem; z-index:9999; }
+a.skip-link:focus { top:1rem; }
+
+/* ── Altair ──────────── */
+.vega-embed .marks { background:transparent !important; }
+
+/* ── Responsive ──────── */
+@media (max-width:640px) {
+    .block-container { padding:1rem 1rem 3rem; }
+    .nd-nav-wordmark { font-size:1rem; }
+}
+</style>
 """
 
 
@@ -753,7 +578,6 @@ def _inject_styles() -> None:
         height=0, width=0,
     )
     st.markdown(_CSS, unsafe_allow_html=True)
-    components.html(_AMBIENT_HTML, height=0)
     st.markdown(
         """
         <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -907,7 +731,10 @@ def render_profile_controls() -> tuple[str, float, str]:
                 )
 
         if save_clicked:
-            bridge = get_bridge()
+            if not render_curiosity_gate("profile_save"):
+                st.warning("Capture observations before changing profile baselines.")
+            else:
+                bridge = get_bridge()
             bridge.save_profile({
                 "business_type": business_type,
                 "tax_reserve_rate": tax_rate,
@@ -1352,6 +1179,7 @@ def render_timesheet(tax_rate: float) -> None:
                     st.caption(f"Showing 8 of {len(preview_df)} rows.")
 
                 _divider_space(0.35)
+                render_go_nogo_checklist("timesheet_upload")
                 submit_c, cancel_c, _ = st.columns([0.32, 0.22, 0.46])
                 with submit_c:
                     if st.button(
@@ -1360,6 +1188,10 @@ def render_timesheet(tax_rate: float) -> None:
                         use_container_width=True,
                         help="Save these entries to the permanent vault and timesheet.",
                     ):
+                        if not st.session_state.get("nd_alignment_timesheet_upload"):
+                            flag_non_aligned_process(f"timesheet:{staged['name']}", staged["name"])
+                            st.error("Submit blocked until Go/No-Go alignment is confirmed.")
+                            st.stop()
                         orchestrator = _get_orchestrator()
                         with st.spinner("Saving to vault…"):
                             result = orchestrator.handle_upload(
@@ -1524,7 +1356,7 @@ absent the row is stored with `$0.00` pay.
             )
             line = (
                 alt.Chart(chart_data)
-                .mark_line(color="#D8B4FE", strokeWidth=2.5, strokeDash=[6, 3])
+                .mark_line(color="#E0D6F8", strokeWidth=2.5, strokeDash=[6, 3])
                 .encode(
                     x=alt.X("month:N", sort=month_sort),
                     y="target:Q",
@@ -1967,16 +1799,15 @@ def render_admin_dashboard() -> None:
 
         with st.form("admin_add_user_form", clear_on_submit=True):
             new_username = st.text_input("Username", placeholder="3-20 characters, alphanumeric/underscores")
-            new_email = st.text_input("Email Address", placeholder="e.g. user@example.com")
             new_password = st.text_input("Password", type="password", placeholder="At least 6 characters")
             new_role = st.selectbox("Assign Account Role", options=["Standard User", "Administrator"])
             submit_add = st.form_submit_button("Register Team Account", use_container_width=True)
 
             if submit_add:
-                if not new_username or not new_email or not new_password:
+                if not new_username or not new_password:
                     st.error("All credential fields are required.")
                 else:
-                    success, msg = auth_store.register(new_username, new_password, new_email, role=new_role)
+                    success, msg = auth_store.register(new_username, new_password, role=new_role)
                     if success:
                         st.success(f"Successfully registered account for '{new_username}' with '{new_role}' role!")
                         _status(f"Registered user: {new_username}")

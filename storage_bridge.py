@@ -23,7 +23,7 @@ import hashlib
 import json
 import re
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -90,21 +90,14 @@ class AuthStore:
     def _write_users(self, users: dict[str, dict[str, Any]]) -> None:
         self._users_file.write_text(json.dumps(users, indent=2), encoding="utf-8")
 
-    def register(self, username: str, password: str, email: str, role: str = "Standard User") -> tuple[bool, str]:
+    def register(self, username: str, password: str, role: str = "Standard User") -> tuple[bool, str]:
         """Register a new user.
 
         Usernames must be 3-20 characters and alphanumeric/underscore.
-        Emails must be valid and unique.
         """
         username = username.strip()
         if not re.match(r"^[a-zA-Z0-9_]{3,20}$", username):
             return False, "Username must be 3-20 characters and only contain letters, numbers, and underscores."
-
-        email = email.strip()
-        # Strict email regex verification
-        email_regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
-        if not re.match(email_regex, email):
-            return False, "Invalid email address format."
 
         if len(password) < 6:
             return False, "Password must be at least 6 characters long."
@@ -114,11 +107,6 @@ class AuthStore:
         if username_lower in {u.lower() for u in users}:
             return False, f"Username '{username}' is already taken."
 
-        # Enforce unique email constraint
-        email_lower = email.lower()
-        if email_lower in {u.get("email", "").lower() for u in users.values()}:
-            return False, f"Email address '{email}' is already registered."
-
         # If it is the first registered user, make them an Administrator, otherwise Standard User
         assigned_role = "Administrator" if not users else role
 
@@ -126,7 +114,6 @@ class AuthStore:
 
         users[username] = {
             "user_id": user_id,
-            "email": email,
             "password_hash": hash_password(password),
             "role": assigned_role,
             "created_at": datetime.now().isoformat(),
@@ -194,91 +181,15 @@ class AuthStore:
         self._write_users(users)
         return True
 
-    def generate_reset_token(self, email: str) -> tuple[bool, str]:
-        """Generate a cryptographically secure, time-sensitive reset token for an email."""
-        email = email.strip().lower()
-        users = self._read_users()
-        
-        matched_username = None
-        for username, data in users.items():
-            if data.get("email", "").strip().lower() == email:
-                matched_username = username
-                break
-                
-        if not matched_username:
-            return False, "No account found with that email address."
-            
-        token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        expires_at = (datetime.now() + timedelta(minutes=15)).isoformat()
-        
-        users[matched_username]["reset_token_hash"] = token_hash
-        users[matched_username]["reset_token_expires"] = expires_at
-        self._write_users(users)
-        
-        return True, token
-
-    def verify_reset_token(self, token: str) -> tuple[bool, str]:
-        """Verify the reset token hash and check if it has expired.
-        
-        Returns (success, username) or (failure, error_msg).
-        """
-        token = token.strip()
-        if not token:
-            return False, "Token cannot be empty."
-            
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        users = self._read_users()
-        
-        matched_username = None
-        for username, data in users.items():
-            if data.get("reset_token_hash") == token_hash:
-                matched_username = username
-                break
-                
-        if not matched_username:
-            return False, "Invalid or unrecognized reset token."
-            
-        expires_str = users[matched_username].get("reset_token_expires")
-        if not expires_str:
-            return False, "Reset token has expired or is invalid."
-            
-        try:
-            expires_at = datetime.fromisoformat(expires_str)
-        except Exception:
-            return False, "Invalid expiration timestamp format."
-            
-        if datetime.now() > expires_at:
-            return False, "Reset token has expired (15-minute limit exceeded)."
-            
-        return True, matched_username
-
-    def reset_password_with_token(self, token: str, new_password: str) -> tuple[bool, str]:
-        """Reset user password using a valid reset token."""
-        success, result = self.verify_reset_token(token)
-        if not success:
-            return False, result
-            
-        username = result
-        if len(new_password) < 6:
-            return False, "Password must be at least 6 characters long."
-            
-        users = self._read_users()
-        users[username]["password_hash"] = hash_password(new_password)
-        
-        # Clear the token after successful reset to prevent reuse
-        users[username].pop("reset_token_hash", None)
-        users[username].pop("reset_token_expires", None)
-        
-        self._write_users(users)
-        return True, "Password reset successful."
-
 
 # ---------------------------------------------------------------------------
 # Column schemas (mirrored from app.py — kept independent for decoupling)
 # ---------------------------------------------------------------------------
 
-_LEDGER_COLS = ["date", "description", "amount", "kind", "category", "source"]
+_LEDGER_COLS = [
+    "date", "description", "amount", "kind", "expense_type", "category", "source",
+]
+EXPENSE_TYPES = ("Business", "Personal")
 _TIMESHEET_COLS = ["date", "project", "hours", "rate", "total_pay"]
 
 
@@ -352,6 +263,29 @@ class StorageBridge:
         self._ensure_dirs()
 
     # ── Internals ─────────────────────────────────────────────────────────
+
+
+    @staticmethod
+    def normalize_ledger(df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure ledger schema including expense_type for Business/Personal isolation."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=_LEDGER_COLS)
+        out = df.copy()
+        if "expense_type" not in out.columns:
+            out["expense_type"] = out["kind"].apply(
+                lambda k: "Business" if str(k).lower() == "income" else "Personal"
+            )
+        else:
+            out["expense_type"] = (
+                out["expense_type"].fillna("Personal").astype(str).replace({"": "Personal", "nan": "Personal"})
+            )
+            invalid = ~out["expense_type"].isin(EXPENSE_TYPES)
+            out.loc[invalid & (out["kind"] == "expense"), "expense_type"] = "Personal"
+            out.loc[invalid & (out["kind"] == "income"), "expense_type"] = "Business"
+        for col in _LEDGER_COLS:
+            if col not in out.columns:
+                out[col] = "Uncategorized" if col == "category" else ("Personal" if col == "expense_type" else "")
+        return out[_LEDGER_COLS]
 
     def _ensure_dirs(self) -> None:
         self._base.mkdir(parents=True, exist_ok=True)
@@ -499,6 +433,23 @@ class StorageBridge:
         self._write_manifest(manifest)
         return True, f"Category '{category}' added successfully."
 
+
+    def rename_tax_category(self, old_name: str, new_name: str) -> tuple[bool, str]:
+        new_name = new_name.strip()
+        if not new_name:
+            return False, "Category name cannot be empty."
+        if old_name in _DEFAULT_MANIFEST["tax_categories"]:
+            return False, f"Cannot rename protected category '{old_name}'."
+        manifest = self._read_manifest()
+        categories = manifest.setdefault("tax_categories", list(_DEFAULT_MANIFEST["tax_categories"]))
+        if old_name not in categories:
+            return False, f"Category '{old_name}' not found."
+        if new_name in categories:
+            return False, f"Category '{new_name}' already exists."
+        categories[categories.index(old_name)] = new_name
+        self._write_manifest(manifest)
+        return True, f"Category renamed to '{new_name}'."
+
     def delete_tax_category(self, category: str) -> tuple[bool, str]:
         """Delete a custom category from the manifest pre-sets list (preserves default categories)."""
         category = category.strip()
@@ -524,12 +475,13 @@ class StorageBridge:
                 return pd.DataFrame(columns=_LEDGER_COLS)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-            return df.dropna(subset=["date"])[_LEDGER_COLS]
+            return self.normalize_ledger(df.dropna(subset=["date"]))
         except Exception:
             return pd.DataFrame(columns=_LEDGER_COLS)
 
     def save_expenses_ledger(self, ledger: pd.DataFrame) -> None:
         """Write the expenses ledger to disk atomically."""
+        ledger = self.normalize_ledger(ledger)
         if ledger.empty:
             self._expenses_ledger_path.write_text(",".join(_LEDGER_COLS) + "\n", encoding="utf-8")
         else:
@@ -545,12 +497,13 @@ class StorageBridge:
                 return pd.DataFrame(columns=_LEDGER_COLS)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-            return df.dropna(subset=["date"])[_LEDGER_COLS]
+            return self.normalize_ledger(df.dropna(subset=["date"]))
         except Exception:
             return pd.DataFrame(columns=_LEDGER_COLS)
 
     def save_income_ledger(self, ledger: pd.DataFrame) -> None:
         """Write the income ledger to disk atomically."""
+        ledger = self.normalize_ledger(ledger)
         if ledger.empty:
             self._income_ledger_path.write_text(",".join(_LEDGER_COLS) + "\n", encoding="utf-8")
         else:
