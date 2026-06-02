@@ -33,7 +33,7 @@ from pypdf import PdfReader
 # Column schemas
 # ---------------------------------------------------------------------------
 
-LEDGER_COLUMNS: list[str] = ["date", "description", "amount", "kind", "category", "source"]
+LEDGER_COLUMNS: list[str] = ["date", "description", "amount", "kind", "expense_type", "category", "source"]
 TIMESHEET_COLUMNS: list[str] = ["date", "project", "hours", "rate", "total_pay"]
 
 CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
@@ -179,12 +179,14 @@ def normalize_csv(file_name: str, data: bytes) -> ParsedDocument:
         for i, a in enumerate(amounts)
     ]
 
+    expense_types = ["Business" if k == "income" else "Personal" for k in kinds]
     ledger = pd.DataFrame(
         {
             "date": dates.dt.date if hasattr(dates, "dt") else dates,
             "description": descriptions,
             "amount": amounts,
             "kind": kinds,
+            "expense_type": expense_types,
             "category": categories,
             "source": file_name,
         },
@@ -222,11 +224,13 @@ def parse_pdf_transactions(file_name: str, text: str) -> pd.DataFrame:
             continue
         amount = coerce_money(currency_matches[-1])
         description = line[: date_match.start()].strip() or line.strip()[:80]
+        kind = classify_kind(amount)
         rows.append({
             "date": entry_date,
             "description": description,
             "amount": amount,
-            "kind": classify_kind(amount),
+            "kind": kind,
+            "expense_type": "Business" if kind == "income" else "Personal",
             "category": "Uncategorized",
             "source": file_name,
         })
@@ -332,6 +336,7 @@ def timesheet_rows_to_ledger(ts_df: pd.DataFrame, source: str) -> pd.DataFrame:
             "description": ts_df["project"].apply(lambda p: f"Timesheet: {p}"),
             "amount": ts_df["total_pay"],
             "kind": "income",
+            "expense_type": "Business",
             "category": "Billable income",
             "source": source,
         },
