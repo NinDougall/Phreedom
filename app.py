@@ -43,7 +43,7 @@ from utils.alignment import (
 
 LEDGER_COLUMNS = ["date", "description", "amount", "kind", "expense_type", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
-APP_PAGES = ["Dashboard", "Timesheet", "Expenses", "Admin Control Panel", "Chat"]
+APP_PAGES = ["Dashboard", "Timesheet", "Expenses", "Profile & Tax Settings", "Admin Control Panel", "Chat"]
 EXPENSE_TYPES = ("Business", "Personal")
 _PROTECTED_CATEGORIES = (
     "Revenue", "Software", "Contractors", "Travel", "Meals",
@@ -722,27 +722,25 @@ def format_usd(amount: float) -> str:
 _CSS = """
 <style>
 :root {
-    --bg:       #09041A;
-    --surface:  #110826;
-    --card:     #170E30;
-    --border:   #2E2148;
-    --border-hi:#463368;
-    --ink:      #F6ECFF;
-    --muted:    #C4B8DF;
-    --subtle:   #8679A4;
-    --accent:   #E0D6F8;
-    --brand:    #8679A4;
-    --pos:      #A7F3D0;
-    --neg:      #FCA5A5;
-    --warn:     #FDE68A;
+    --bg:       #F8FAFC;
+    --surface:  #FFFFFF;
+    --card:     #FFFFFF;
+    --border:   #E2E8F0;
+    --border-hi:#CBD5E1;
+    --ink:      #0F172A;
+    --muted:    #64748B;
+    --subtle:   #64748B;
+    --accent:   #0D7A87;
+    --accent-hi:#0A5C66;
+    --brand:    #0D7A87;
+    --pos:      #047857;
+    --neg:      #B91C1C;
+    --warn:     #B45309;
     --radius:   0.85rem;
     --radius-sm:0.55rem;
 }
 .stApp {
-    background:
-        radial-gradient(ellipse 80% 40% at 15% -10%, rgba(134,121,164,.20), transparent),
-        radial-gradient(ellipse 60% 30% at 90%  5%, rgba(224,214,248,.07), transparent),
-        var(--bg);
+    background: var(--bg);
     color: var(--ink);
 }
 .block-container { max-width:1180px; padding:2.25rem 2.5rem 4rem; }
@@ -759,8 +757,8 @@ p,li,label,span,td,th { color:var(--ink); }
 /* ── Nav ────────────── */
 .nd-nav-brand { align-items:center; display:flex; gap:0.7rem; flex-shrink:0; }
 .nd-nav-wordmark { color:var(--accent); font-size:1.15rem; font-weight:800; letter-spacing:-0.04em; line-height:1; }
-.nd-nav-tagline  { color:var(--subtle); font-size:0.72rem; font-weight:600; letter-spacing:0.04em; line-height:1; margin-top:0.2rem; text-transform:uppercase; }
-.nd-nav-page     { color:var(--subtle); font-size:0.8rem; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; }
+.nd-nav-tagline  { color:var(--muted); font-size:0.72rem; font-weight:600; letter-spacing:0.04em; line-height:1; margin-top:0.2rem; text-transform:uppercase; }
+.nd-nav-page     { color:var(--muted); font-size:0.8rem; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; }
 
 /* ── Section headings ── */
 .nd-section { border-top:1px solid var(--border); margin:2.5rem 0 1.25rem; padding-top:1.5rem; }
@@ -770,7 +768,7 @@ p,li,label,span,td,th { color:var(--ink); }
 
 /* ── KPI tiles ─────── */
 .nd-metric         { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:1.1rem 1.15rem 1.2rem; }
-.nd-metric-label   { color:var(--subtle); font-size:0.72rem; font-weight:800; letter-spacing:0.12em; margin-bottom:0.6rem; text-transform:uppercase; }
+.nd-metric-label   { color:var(--muted); font-size:0.72rem; font-weight:800; letter-spacing:0.12em; margin-bottom:0.6rem; text-transform:uppercase; }
 .nd-metric-value   { color:var(--accent); font-size:clamp(1.35rem,2.2vw,1.9rem); font-weight:750; letter-spacing:-0.04em; line-height:1; }
 .nd-metric-value.pos { color:var(--pos); }
 .nd-metric-value.neg { color:var(--neg); }
@@ -778,9 +776,9 @@ p,li,label,span,td,th { color:var(--ink); }
 /* ── Registry table row ── */
 .nd-registry-row   { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:0.55rem; padding:0.85rem 1rem; }
 .nd-registry-name  { color:var(--ink); font-weight:700; font-size:0.95rem; }
-.nd-registry-meta  { color:var(--subtle); font-size:0.78rem; line-height:1.8; }
-.nd-badge          { background:rgba(167,243,208,0.14); border:1px solid rgba(167,243,208,0.30); border-radius:999px; color:var(--pos); display:inline-block; font-size:0.68rem; font-weight:800; letter-spacing:0.10em; padding:0.2rem 0.55rem; text-transform:uppercase; vertical-align:middle; }
-.nd-badge-warn     { background:rgba(253,230,138,0.12); border-color:rgba(253,230,138,0.28); color:var(--warn); }
+.nd-registry-meta  { color:var(--muted); font-size:0.78rem; line-height:1.8; }
+.nd-badge          { background:rgba(4,120,87,0.10); border:1px solid rgba(4,120,87,0.25); border-radius:999px; color:var(--pos); display:inline-block; font-size:0.68rem; font-weight:800; letter-spacing:0.10em; padding:0.2rem 0.55rem; text-transform:uppercase; vertical-align:middle; }
+.nd-badge-warn     { background:rgba(180,83,9,0.10); border-color:rgba(180,83,9,0.25); color:var(--warn); }
 
 /* ── Note ──────────── */
 .nd-note { color:var(--muted); font-size:0.92rem; line-height:1.65; margin:0.4rem 0 1rem; }
@@ -789,20 +787,23 @@ p,li,label,span,td,th { color:var(--ink); }
 .stButton>button,
 .stDownloadButton>button,
 .stFormSubmitButton>button {
-    background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius-sm);
-    color:#170431; font-weight:800; min-height:2.6rem; padding:0 1.1rem;
+    background:var(--surface); border:1px solid var(--accent); border-radius:var(--radius-sm);
+    color:var(--ink); font-weight:700; min-height:2.6rem; padding:0 1.1rem;
 }
 .stButton>button:hover,
 .stDownloadButton>button:hover,
 .stFormSubmitButton>button:hover {
-    background:var(--ink); border-color:var(--ink); color:#170431;
+    background:var(--accent); border-color:var(--accent-hi); color:#FFFFFF;
 }
 
-/* ── Popover (menu) ── */
-div[data-testid="stPopover"] button {
-    background:var(--surface) !important; border:1px solid var(--border-hi) !important;
-    border-radius:var(--radius-sm) !important; color:var(--accent) !important;
-    font-weight:800 !important; min-height:2.6rem; min-width:5.5rem;
+/* ── Popover menu trigger ── */
+div[data-testid="stPopover"] > button {
+    background:var(--accent) !important; border:1px solid var(--accent-hi) !important;
+    border-radius:var(--radius-sm) !important; color:#FFFFFF !important;
+    font-weight:700 !important; min-height:2.6rem; min-width:5.5rem;
+}
+div[data-testid="stPopover"] > button:hover {
+    background:var(--accent-hi) !important; color:#FFFFFF !important;
 }
 
 /* ── Expanders ─────── */
@@ -822,20 +823,20 @@ div[data-testid="stDataEditor"] { border:1px solid var(--border); border-radius:
 /* ── Inputs ─────────── */
 input,textarea,select,
 div[data-baseweb="select"],
-div[data-baseweb="input"] { min-height:2.5rem; }
+div[data-baseweb="input"] { min-height:2.5rem; color:var(--ink); background-color:var(--surface); }
 
 /* ── Focus (WCAG 2.2) ─ */
 button:focus-visible,a:focus-visible,
 input:focus-visible,textarea:focus-visible,
 [tabindex]:focus-visible { outline:3px solid var(--accent) !important; outline-offset:3px !important; }
 
-/* ── Elegant Hover Micro-Interactions ── */
+/* ── Hover micro-interactions ── */
 .nd-metric, div[data-testid="stFileUploader"], div[data-testid="stExpander"], .nd-registry-row, div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
     transition: border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 .nd-metric:hover, div[data-testid="stFileUploader"]:hover, div[data-testid="stExpander"]:hover, .nd-registry-row:hover, div[data-testid="stDataFrame"]:hover, div[data-testid="stDataEditor"]:hover {
-    border-color: #0D7A87 !important;
-    box-shadow: 0 0 12px rgba(13, 122, 135, 0.2) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 12px rgba(13, 122, 135, 0.15) !important;
     background-color: rgba(13, 122, 135, 0.03) !important;
 }
 .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
@@ -843,20 +844,20 @@ input:focus-visible,textarea:focus-visible,
 }
 .stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
     transform: translateY(-1px) !important;
-    border-color: #0D7A87 !important;
-    background-color: #0D7A87 !important;
+    border-color: var(--accent-hi) !important;
+    background-color: var(--accent) !important;
     color: #FFFFFF !important;
-    box-shadow: 0 4px 12px rgba(13, 122, 135, 0.3) !important;
+    box-shadow: 0 4px 12px rgba(13, 122, 135, 0.25) !important;
 }
 
 /* ── Alerts ─────────── */
-div[data-testid="stAlert"] { background:var(--card); border:1px solid var(--border-hi); border-radius:var(--radius-sm); }
+div[data-testid="stAlert"] { background:var(--card); border:1px solid var(--border-hi); border-radius:var(--radius-sm); color:var(--ink); }
 
 /* ── SR-only ─────────── */
 .sr-only { clip:rect(0 0 0 0); clip-path:inset(50%); height:1px; overflow:hidden; position:absolute; white-space:nowrap; width:1px; }
 
 /* ── Skip link ────────── */
-a.skip-link { background:var(--accent); border-radius:var(--radius-sm); color:#170431; font-weight:800; left:1rem; padding:0.65rem 1rem; position:absolute; top:-5rem; z-index:9999; }
+a.skip-link { background:var(--accent); border-radius:var(--radius-sm); color:#FFFFFF; font-weight:800; left:1rem; padding:0.65rem 1rem; position:absolute; top:-5rem; z-index:9999; }
 a.skip-link:focus { top:1rem; }
 
 /* ── Altair ──────────── */
@@ -866,6 +867,46 @@ a.skip-link:focus { top:1rem; }
 @media (max-width:640px) {
     .block-container { padding:1rem 1rem 3rem; }
     .nd-nav-wordmark { font-size:1rem; }
+}
+</style>
+"""
+
+_SURFACE_CONTRAST_CSS = """
+<style>
+/* Nav popover body — force readable text on white surfaces */
+div[data-testid="stPopoverBody"] {
+    background-color: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    color: #0F172A !important;
+}
+div[data-testid="stPopoverBody"] p,
+div[data-testid="stPopoverBody"] span,
+div[data-testid="stPopoverBody"] label,
+div[data-testid="stPopoverBody"] strong,
+div[data-testid="stPopoverBody"] em,
+div[data-testid="stPopoverBody"] li,
+div[data-testid="stPopoverBody"] div {
+    color: #0F172A !important;
+}
+div[data-testid="stPopoverBody"] .stButton > button {
+    background-color: #FFFFFF !important;
+    border: 1px solid #0D7A87 !important;
+    color: #0F172A !important;
+    font-weight: 600 !important;
+}
+div[data-testid="stPopoverBody"] .stButton > button:hover {
+    background-color: #0D7A87 !important;
+    border-color: #0A5C66 !important;
+    color: #FFFFFF !important;
+}
+div[data-testid="stPopoverBody"] .stButton > button:disabled {
+    background-color: #F1F5F9 !important;
+    border-color: #CBD5E1 !important;
+    color: #64748B !important;
+    opacity: 1 !important;
+}
+div[data-testid="stPopoverBody"] hr {
+    border-color: #E2E8F0 !important;
 }
 </style>
 """
@@ -966,6 +1007,7 @@ def _inject_styles() -> None:
         height=0, width=0,
     )
     st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(_SURFACE_CONTRAST_CSS, unsafe_allow_html=True)
     st.markdown(_DROPDOWN_ACCESSIBILITY_CSS, unsafe_allow_html=True)
     st.markdown(
         """
@@ -1082,48 +1124,54 @@ def render_nav() -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_profile_controls() -> tuple[str, float, str]:
-    with st.expander("⚙  Profile & tax settings", expanded=False):
-        with st.form("profile_form"):
-            c1, c2, c3 = st.columns([1.2, 0.9, 1.5], gap="large")
-            with c1:
-                business_type = st.text_input(
-                    "Business or income type",
-                    value=st.session_state.profile_business_type,
-                    placeholder="Freelancer, LLC, sole proprietor…",
-                    help="Used by the chat agent when personalising responses.",
-                )
-            with c2:
-                tax_rate = (
-                    st.slider(
-                        "Tax reserve rate", 0, 50,
-                        int(st.session_state.profile_tax_rate * 100),
-                        format="%d%%",
-                        help="Percentage of positive net profit to reserve for taxes.",
-                    ) / 100
-                )
-            with c3:
-                tax_notes = st.text_area(
-                    "Tax notes",
-                    value=st.session_state.profile_tax_notes,
-                    placeholder="State, filing status, estimated payments…",
-                    help="Optional context for Phreedom's tax recommendations.",
-                    height=80,
-                )
-            col_save, col_clear = st.columns([0.35, 0.65])
-            with col_save:
-                save_clicked = st.form_submit_button("Save profile", use_container_width=True)
-            with col_clear:
-                clear_clicked = st.form_submit_button(
-                    "Clear all financial data",
-                    help="Removes uploads, ledger, chat history, timesheet, and vault.",
-                )
+def render_profile_page() -> None:
+    """Dedicated page for business profile and tax reserve configuration."""
+    _section(
+        "Profile & Tax Settings",
+        "Configuration",
+        "Set your business type, tax reserve rate, and planning notes. Changes persist to disk immediately.",
+    )
 
-        if save_clicked:
-            if not render_curiosity_gate("profile_save"):
-                st.warning("Capture observations before changing profile baselines.")
-            else:
-                bridge = get_bridge()
+    with st.form("profile_form"):
+        c1, c2, c3 = st.columns([1.2, 0.9, 1.5], gap="large")
+        with c1:
+            business_type = st.text_input(
+                "Business or income type",
+                value=st.session_state.profile_business_type,
+                placeholder="Freelancer, LLC, sole proprietor…",
+                help="Used by the chat agent when personalising responses.",
+            )
+        with c2:
+            tax_rate = (
+                st.slider(
+                    "Tax reserve rate", 0, 50,
+                    int(st.session_state.profile_tax_rate * 100),
+                    format="%d%%",
+                    help="Percentage of positive net profit to reserve for taxes.",
+                ) / 100
+            )
+        with c3:
+            tax_notes = st.text_area(
+                "Tax notes",
+                value=st.session_state.profile_tax_notes,
+                placeholder="State, filing status, estimated payments…",
+                help="Optional context for Phreedom's tax recommendations.",
+                height=120,
+            )
+        col_save, col_clear = st.columns([0.35, 0.65])
+        with col_save:
+            save_clicked = st.form_submit_button("Save profile", use_container_width=True)
+        with col_clear:
+            clear_clicked = st.form_submit_button(
+                "Clear all financial data",
+                help="Removes uploads, ledger, chat history, timesheet, and vault.",
+            )
+
+    if save_clicked:
+        if not render_curiosity_gate("profile_save"):
+            st.warning("Capture observations before changing profile baselines.")
+        else:
+            bridge = get_bridge()
             bridge.save_profile({
                 "business_type": business_type,
                 "tax_reserve_rate": tax_rate,
@@ -1135,19 +1183,13 @@ def render_profile_controls() -> tuple[str, float, str]:
             st.success("Profile saved to disk.")
             _status("Profile settings saved.")
 
-        if clear_clicked:
-            bridge = get_bridge()
-            bridge.purge_all()
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            _status("All financial data cleared from disk and session.")
-            st.rerun()
-
-    return (
-        st.session_state.profile_business_type,
-        st.session_state.profile_tax_rate,
-        st.session_state.profile_tax_notes,
-    )
+    if clear_clicked:
+        bridge = get_bridge()
+        bridge.purge_all()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        _status("All financial data cleared from disk and session.")
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1340,13 +1382,13 @@ def render_spending_dashboard(ledger: pd.DataFrame) -> None:
                 x=alt.X(
                     "amount:Q",
                     title="USD spent",
-                    axis=alt.Axis(labelColor="#C4B8DF", format="$,.0f"),
+                    axis=alt.Axis(labelColor="#64748B", format="$,.0f"),
                 ),
                 y=alt.Y(
                     "category:N",
                     sort="-x",
                     title=None,
-                    axis=alt.Axis(labelColor="#C4B8DF"),
+                    axis=alt.Axis(labelColor="#64748B"),
                 ),
                 color=alt.Color(
                     "amount:Q",
@@ -1738,8 +1780,8 @@ absent the row is stored with `$0.00` pay.
                 .mark_bar(color="#8679A4", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
                 .encode(
                     x=alt.X("month:N", sort=month_sort, title=None,
-                             axis=alt.Axis(labelColor="#C4B8DF")),
-                    y=alt.Y("actual:Q", title="USD", axis=alt.Axis(labelColor="#C4B8DF")),
+                             axis=alt.Axis(labelColor="#64748B")),
+                    y=alt.Y("actual:Q", title="USD", axis=alt.Axis(labelColor="#64748B")),
                     tooltip=["month", alt.Tooltip("actual:Q", format="$,.2f", title="Actual")],
                 )
             )
@@ -2327,7 +2369,9 @@ def main() -> None:
     init_state()
 
     active_page = render_nav()
-    business_type, tax_rate, tax_notes = render_profile_controls()
+    business_type = st.session_state.profile_business_type
+    tax_rate = st.session_state.profile_tax_rate
+    tax_notes = st.session_state.profile_tax_notes
 
     if active_page == "Dashboard":
         render_dashboard(tax_rate)
@@ -2335,6 +2379,8 @@ def main() -> None:
         render_timesheet(tax_rate)
     elif active_page in ("Expenses", "Categorization"):
         render_expenses_page()
+    elif active_page == "Profile & Tax Settings":
+        render_profile_page()
     elif active_page == "Admin Control Panel":
         render_admin_dashboard()
     elif active_page == "Chat":
