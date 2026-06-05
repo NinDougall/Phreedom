@@ -166,6 +166,7 @@ class AuthStore:
         return [
             {
                 "username": username,
+                "email": data.get("email", "—"),
                 "user_id": data.get("user_id", "—"),
                 "role": data.get("role", "Standard User"),
                 "created_at": data.get("created_at", "—"),
@@ -192,20 +193,53 @@ class AuthStore:
         self._write_users(users)
         return True
 
-    def generate_reset_token(self, email: str) -> tuple[bool, str]:
-        """Generate a cryptographically secure, time-sensitive reset token for an email."""
-        email = email.strip().lower()
+    def _find_user_for_reset(self, identifier: str) -> tuple[str | None, str | None]:
+        """Resolve a username from an email address or username (legacy accounts)."""
+        identifier = identifier.strip().lower()
+        if not identifier:
+            return None, None
+
         users = self._read_users()
-
-        matched_username = None
         for username, data in users.items():
-            if data.get("email", "").strip().lower() == email:
-                matched_username = username
-                break
+            if data.get("email", "").strip().lower() == identifier:
+                return username, data.get("email", "").strip() or None
 
+        for username in users:
+            if username.lower() == identifier:
+                return username, users[username].get("email", "").strip() or None
+
+        return None, None
+
+    def update_user_email(self, username: str, email: str) -> tuple[bool, str]:
+        """Assign or update a user's email address (admin maintenance)."""
+        email = email.strip()
+        email_regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+        if not re.match(email_regex, email):
+            return False, "Invalid email address format."
+
+        users = self._read_users()
+        if username not in users:
+            return False, f"User '{username}' was not found."
+
+        email_lower = email.lower()
+        for other_name, data in users.items():
+            if other_name != username and data.get("email", "").strip().lower() == email_lower:
+                return False, f"Email address '{email}' is already registered."
+
+        users[username]["email"] = email
+        self._write_users(users)
+        return True, "Email address updated successfully."
+
+    def generate_reset_token(self, identifier: str) -> tuple[bool, str, str]:
+        """Generate a secure reset token for an email address or username.
+
+        Returns (success, token_or_error_message, username).
+        """
+        matched_username, stored_email = self._find_user_for_reset(identifier)
         if not matched_username:
-            return False, "No account found with that email address."
+            return False, "No account found with that email address or username.", ""
 
+        users = self._read_users()
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         expires_at = (datetime.now() + timedelta(minutes=15)).isoformat()
@@ -214,7 +248,7 @@ class AuthStore:
         users[matched_username]["reset_token_expires"] = expires_at
         self._write_users(users)
 
-        return True, token
+        return True, token, matched_username
 
     def verify_reset_token(self, token: str) -> tuple[bool, str]:
         """Verify the reset token hash and check if it has expired.
@@ -268,6 +302,21 @@ class AuthStore:
 
         self._write_users(users)
         return True, "Password reset successful."
+
+
+def generate_password_reset_token(identifier: str, base_dir: Path | str = ".ndeavour_profile") -> tuple[bool, str, str]:
+    """Module-level helper used by the UI to avoid stale class definitions on hot reload."""
+    return AuthStore(base_dir).generate_reset_token(identifier)
+
+
+def verify_password_reset_token(token: str, base_dir: Path | str = ".ndeavour_profile") -> tuple[bool, str]:
+    """Module-level helper to verify a password reset token."""
+    return AuthStore(base_dir).verify_reset_token(token)
+
+
+def reset_password_with_token(token: str, new_password: str, base_dir: Path | str = ".ndeavour_profile") -> tuple[bool, str]:
+    """Module-level helper to reset a password with a valid token."""
+    return AuthStore(base_dir).reset_password_with_token(token, new_password)
 
 
 # ---------------------------------------------------------------------------

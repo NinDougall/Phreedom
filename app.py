@@ -209,7 +209,18 @@ def render_auth_flow() -> bool:
     if "authenticated_user" in st.session_state:
         return True
 
-    from storage_bridge import AuthStore, StorageBridge
+    import importlib
+
+    import storage_bridge as _storage_bridge
+    importlib.reload(_storage_bridge)
+
+    from storage_bridge import (
+        AuthStore,
+        StorageBridge,
+        generate_password_reset_token,
+        reset_password_with_token,
+        verify_password_reset_token,
+    )
     from utils.mailer import send_reset_email
 
     auth_store = AuthStore()
@@ -236,35 +247,38 @@ def render_auth_flow() -> bool:
             )
             st.markdown(
                 '<p style="text-align: center; color: #64748B !important; font-size: 0.95rem; margin-bottom: 2rem;">'
-                'Enter your registered email address below. If an account exists, we will send you a secure password reset link valid for 15 minutes.</p>',
+                'Enter your registered email address or username below. If an account exists, we will send you a secure password reset link valid for 15 minutes.</p>',
                 unsafe_allow_html=True,
             )
 
             with st.form("forgot_password_form"):
-                email = st.text_input("Email Address", placeholder="Enter your email address")
+                email = st.text_input("Email Address or Username", placeholder="Enter your email address or username")
                 submitted = st.form_submit_button("Send Reset Link", use_container_width=True)
 
                 if submitted:
                     if not email:
                         st.error("Please enter your email address.")
                     else:
-                        success, result = auth_store.generate_reset_token(email)
+                        success, result, username = generate_password_reset_token(email)
                         if success:
                             users = auth_store._read_users()
-                            username = "User"
-                            for u, data in users.items():
-                                if data.get("email", "").strip().lower() == email.strip().lower():
-                                    username = u
-                                    break
+                            delivery_email = users.get(username, {}).get("email", "").strip() or email.strip()
+                            app_url = (
+                                os.environ.get("APP_URL")
+                                or os.environ.get("STREAMLIT_SERVER_URL")
+                                or "http://localhost:8501"
+                            )
 
-                            mail_success, mail_msg = send_reset_email(email, username, result)
+                            mail_success, mail_msg = send_reset_email(
+                                delivery_email, username, result, app_url=app_url.rstrip("/")
+                            )
                             if mail_success:
                                 st.success("A secure password reset link has been sent to your email address.")
                             else:
                                 st.info(mail_msg)
 
                             st.session_state.auth_view = "enter_token"
-                            st.session_state.reset_email = email
+                            st.session_state.reset_email = delivery_email
                             _status("Reset token generated successfully.")
                             st.rerun()
                         else:
@@ -306,7 +320,7 @@ def render_auth_flow() -> bool:
                     if not token:
                         st.error("Please enter the recovery token.")
                     else:
-                        success, result = auth_store.verify_reset_token(token)
+                        success, result = verify_password_reset_token(token)
                         if success:
                             st.session_state.auth_view = "reset_password"
                             st.session_state.reset_token = token
@@ -324,7 +338,7 @@ def render_auth_flow() -> bool:
         st.markdown(_AUTH_LIGHT_CSS, unsafe_allow_html=True)
 
         token = st.session_state.get("reset_token", "")
-        success, result = auth_store.verify_reset_token(token)
+        success, result = verify_password_reset_token(token)
 
         col1, col2, col3 = st.columns([0.25, 0.5, 0.25])
         with col2:
@@ -365,7 +379,7 @@ def render_auth_flow() -> bool:
                         elif new_password != confirm_password:
                             st.error("Passwords do not match.")
                         else:
-                            reset_success, reset_msg = auth_store.reset_password_with_token(token, new_password)
+                            reset_success, reset_msg = reset_password_with_token(token, new_password)
                             if reset_success:
                                 st.success("Your password has been successfully reset. Redirecting to login...")
                                 _status("Password reset successful.")
@@ -2066,18 +2080,28 @@ def render_admin_dashboard() -> None:
                     options=["Standard User", "Administrator"], 
                     index=0 if target_data["role"] == "Standard User" else 1
                 )
+                current_email = target_data.get("email", "—")
+                new_email_assign = st.text_input(
+                    "Email Address",
+                    value="" if current_email == "—" else current_email,
+                    placeholder="e.g. user@example.com",
+                )
                 
                 submit_modify = st.form_submit_button("Commit Workspace Modifications", use_container_width=True)
 
                 if submit_modify:
                     status_ok = auth_store.update_user_status(target_user, new_status)
                     role_ok = auth_store.update_user_role(target_user, new_role_assign)
-                    if status_ok and role_ok:
+                    email_ok = True
+                    email_msg = ""
+                    if new_email_assign.strip():
+                        email_ok, email_msg = auth_store.update_user_email(target_user, new_email_assign)
+                    if status_ok and role_ok and email_ok:
                         st.success(f"Workspace updates committed successfully for '{target_user}'!")
                         _status(f"Modified user workspace: {target_user}")
                         st.rerun()
                     else:
-                        st.error("Failed to commit user workspace modifications.")
+                        st.error(email_msg or "Failed to commit user workspace modifications.")
 
     with col_table:
         st.markdown("##### 👥  Registered User Profiles")
@@ -2090,6 +2114,7 @@ def render_admin_dashboard() -> None:
             # Retheme/Format presentation headers
             admin_df = admin_df.rename(columns={
                 "username": "Username",
+                "email": "Email Address",
                 "user_id": "Secure User ID",
                 "role": "Account Role",
                 "created_at": "Registration Record",
