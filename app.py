@@ -797,9 +797,10 @@ p,li,label,span,td,th { color: var(--ink); }
 .stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
   background: rgba(216,180,254,0.1) !important; border-color: rgba(216,180,254,0.8) !important;
   box-shadow: 0 0 30px rgba(216,180,254,0.15) !important; transform: translateY(-2px) !important; }
-div[data-testid="stPopover"] > button { background: var(--surface) !important; border: 1px solid var(--border-hi) !important;
+div[data-testid="stPopover"] > button { background: var(--surface) !important; border: 1px solid rgba(216,180,254,0.18) !important;
   border-radius: var(--radius) !important; color: var(--nd-lavender) !important; font-weight: 300 !important;
-  font-size: 0.625rem !important; letter-spacing: 0.2em !important; text-transform: uppercase; min-height: 2.6rem; min-width: 5.5rem; }
+  font-size: 0.625rem !important; letter-spacing: 0.2em !important; text-transform: uppercase; min-height: 2.6rem; min-width: 5.5rem;
+  padding: 0 1.25rem !important; }
 button[data-baseweb="tab"] { color: var(--muted) !important; font-size: 0.625rem !important; letter-spacing: 0.2em !important; text-transform: uppercase; }
 button[data-baseweb="tab"][aria-selected="true"] { color: var(--nd-lavender) !important; border-color: rgba(216,180,254,0.4) !important; }
 div[data-testid="stExpander"], div[data-testid="stFileUploader"], .stChatMessage, div[data-testid="stAlert"] {
@@ -883,28 +884,93 @@ div[data-testid="stPopoverBody"] em,
 div[data-testid="stPopoverBody"] li {
     color: #ffffff !important;
 }
-div[data-testid="stPopoverBody"] .stButton > button {
-    background-color: transparent !important;
-    border: 1px solid rgba(216, 180, 254, 0.3) !important;
-    color: #ffffff !important;
-    font-weight: 300 !important;
-    letter-spacing: 0.15em !important;
+</style>
+"""
+
+_NAV_MENU_CSS = """
+<style>
+div[data-testid="stPopoverBody"] {
+    min-width: 18rem !important;
+    padding: 1.75rem 1.5rem 1.5rem !important;
+    border-radius: var(--radius-card) !important;
+}
+div[data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+    gap: 0.25rem !important;
+}
+.nd-nav-menu-eyebrow {
+    color: rgba(216, 180, 254, 0.6) !important;
+    font-size: 0.5625rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.5em !important;
+    margin: 0 0 1.25rem 0 !important;
     text-transform: uppercase !important;
 }
-div[data-testid="stPopoverBody"] .stButton > button:hover {
-    background-color: rgba(216, 180, 254, 0.15) !important;
-    border-color: rgba(216, 180, 254, 0.8) !important;
+.nd-nav-item--active {
+    background: rgba(216, 180, 254, 0.06);
+    border-left: 2px solid var(--nd-lavender);
+    border-radius: 0.5rem;
+    color: var(--nd-lavender) !important;
+    font-size: 0.95rem;
+    font-weight: 400;
+    margin-bottom: 0.35rem;
+    padding: 0.65rem 1rem;
+}
+div[data-testid="stPopoverBody"] .stButton > button {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0.5rem !important;
+    box-shadow: none !important;
     color: #ffffff !important;
-    box-shadow: 0 0 20px rgba(216, 180, 254, 0.15) !important;
+    font-size: 0.95rem !important;
+    font-weight: 300 !important;
+    justify-content: flex-start !important;
+    letter-spacing: 0.02em !important;
+    margin-bottom: 0.35rem !important;
+    min-height: 2.75rem !important;
+    padding: 0.65rem 1rem !important;
+    text-transform: none !important;
+    transition: background-color 0.4s cubic-bezier(0.16, 1, 0.3, 1) !important;
 }
-div[data-testid="stPopoverBody"] .stButton > button:disabled {
-    background-color: rgba(216, 180, 254, 0.08) !important;
-    border-color: rgba(216, 180, 254, 0.2) !important;
-    color: #9ca3af !important;
-    opacity: 1 !important;
+div[data-testid="stPopoverBody"] .stButton > button:hover {
+    background: rgba(216, 180, 254, 0.08) !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #ffffff !important;
+    transform: none !important;
 }
-div[data-testid="stPopoverBody"] hr {
-    border-color: rgba(216, 180, 254, 0.15) !important;
+.nd-nav-menu-footer {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    margin-top: 1.5rem;
+    padding-top: 1.25rem;
+}
+.nd-nav-menu-user {
+    color: var(--muted) !important;
+    font-size: 0.85rem !important;
+    font-weight: 300 !important;
+    line-height: 1.7 !important;
+    margin: 0 !important;
+}
+.nd-nav-menu-user strong {
+    color: #ffffff !important;
+    font-weight: 400 !important;
+}
+.nd-nav-menu-user em {
+    color: rgba(216, 180, 254, 0.75) !important;
+    font-style: italic !important;
+}
+div[data-testid="stPopoverBody"] .stButton:last-child > button {
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    color: var(--muted) !important;
+    font-size: 0.85rem !important;
+    letter-spacing: 0.05em !important;
+    margin-top: 0.75rem !important;
+    min-height: 2.25rem !important;
+    text-transform: none !important;
+}
+div[data-testid="stPopoverBody"] .stButton:last-child > button:hover {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border-color: rgba(216, 180, 254, 0.25) !important;
+    color: #ffffff !important;
 }
 </style>
 """
@@ -1010,6 +1076,7 @@ def _inject_styles() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
     components.html(_AMBIENT_HTML, height=0)
     st.markdown(_SURFACE_CONTRAST_CSS, unsafe_allow_html=True)
+    st.markdown(_NAV_MENU_CSS, unsafe_allow_html=True)
     st.markdown(_DROPDOWN_ACCESSIBILITY_CSS, unsafe_allow_html=True)
     st.markdown(
         """
@@ -1085,25 +1152,40 @@ def render_nav() -> str:
             )
         with menu_col:
             with st.popover("☰  Menu"):
-                st.markdown("**Navigate**")
-                st.divider()
-                
-                # Check user role and restrict access to Admin Control Panel
+                st.markdown(
+                    '<p class="nd-nav-menu-eyebrow">Navigate</p>',
+                    unsafe_allow_html=True,
+                )
+
                 is_admin = st.session_state.get("authenticated_user_role", "Standard User") == "Administrator"
-                
+
                 for page in APP_PAGES:
                     if page == "Admin Control Panel" and not is_admin:
-                        continue  # Skip for Standard User
+                        continue
                     is_active = page == st.session_state.active_page
-                    label = f"→  {page}" if is_active else f"   {page}"
-                    if st.button(label, key=f"_nav_{page}", use_container_width=True, disabled=is_active):
+                    if is_active:
+                        st.markdown(
+                            f'<div class="nd-nav-item--active" aria-current="page">'
+                            f'{html.escape(page)}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    elif st.button(page, key=f"_nav_{page}", use_container_width=True):
                         st.session_state.active_page = page
                         _status(f"Navigated to {page}.")
                         st.rerun()
-                st.divider()
-                st.markdown(f"User: **{st.session_state.authenticated_user}**\nRole: *{st.session_state.get('authenticated_user_role', 'Standard User')}*")
-                if st.button("🚪  Log out", key="_nav_logout", use_container_width=True):
-                    # Clear session state for logout
+
+                _divider_space(0.75)
+
+                user = html.escape(st.session_state.authenticated_user)
+                role = html.escape(st.session_state.get("authenticated_user_role", "Standard User"))
+                st.markdown(
+                    f'<div class="nd-nav-menu-footer">'
+                    f'<p class="nd-nav-menu-user">User: <strong>{user}</strong></p>'
+                    f'<p class="nd-nav-menu-user">Role: <em>{role}</em></p>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("Log out", key="_nav_logout", use_container_width=True):
                     for key in list(st.session_state.keys()):
                         del st.session_state[key]
                     _status("Logged out successfully.")
