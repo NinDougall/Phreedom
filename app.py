@@ -29,15 +29,26 @@ import streamlit.components.v1 as components
 
 from agents import OrchestratorAgent
 from storage_bridge import get_bridge
+from utils.alignment import (
+    flag_non_aligned_process,
+    render_alignment_blueprint,
+    render_curiosity_gate,
+    render_go_nogo_checklist,
+)
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-LEDGER_COLUMNS = ["date", "description", "amount", "kind", "category", "source"]
+LEDGER_COLUMNS = ["date", "description", "amount", "kind", "expense_type", "category", "source"]
 TIMESHEET_COLUMNS = ["date", "project", "hours", "rate", "total_pay"]
-APP_PAGES = ["Dashboard", "Timesheet", "Categorization", "Admin Control Panel", "Chat"]
+APP_PAGES = ["Dashboard", "Timesheet", "Expenses", "Admin Control Panel", "Chat"]
+EXPENSE_TYPES = ("Business", "Personal")
+_PROTECTED_CATEGORIES = (
+    "Revenue", "Software", "Contractors", "Travel", "Meals",
+    "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized",
+)
 
 CURRENCY_RE = re.compile(r"(?<!\w)[-$]?\$?\s?[\d,]+(?:\.\d{2})?(?!\w)")
 DATE_RE = re.compile(
@@ -510,10 +521,10 @@ def init_state() -> None:
     # File staging for explicit Submit flow
     st.session_state.ts_uploader_rev = 0
     st.session_state.ts_staged_file = None
+    st.session_state.exp_uploader_rev = 0
 
-    # File staging for explicit Submit flow on the Timesheet page
-    st.session_state.ts_uploader_rev = 0
-    st.session_state.ts_staged_file = None
+    if st.session_state.get("active_page") == "Categorization":
+        st.session_state.active_page = "Expenses"
 
     st.session_state.profile_business_type = profile.get("business_type", "")
     st.session_state.profile_tax_rate = float(profile.get("tax_reserve_rate", 0.30))
@@ -528,6 +539,57 @@ def init_state() -> None:
 def _flush_expenses_ledger() -> None:
     get_bridge().save_expenses_ledger(st.session_state.expenses_ledger)
     st.session_state.ledger = get_bridge().fetch_ledger()
+
+
+def _normalize_expenses_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure expense rows include Business/Personal classification."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+    out = df.copy()
+    if "expense_type" not in out.columns:
+        out["expense_type"] = "Personal"
+    out["expense_type"] = (
+        out["expense_type"].fillna("Personal").astype(str).replace({"": "Personal", "nan": "Personal"})
+    )
+    invalid = ~out["expense_type"].isin(EXPENSE_TYPES)
+    out.loc[invalid, "expense_type"] = "Personal"
+    for col in LEDGER_COLUMNS:
+        if col not in out.columns:
+            out[col] = "Uncategorized" if col == "category" else ("Personal" if col == "expense_type" else "")
+    return out[LEDGER_COLUMNS]
+
+
+def _custom_categories(categories_list: list[str]) -> list[str]:
+    return [c for c in categories_list if c not in _PROTECTED_CATEGORIES]
+
+
+def _render_expense_mini_dashboard(expenses_df: pd.DataFrame) -> None:
+    """Top-level mini expense metrics dashboard."""
+    from agents.tax_engine import TaxEngine
+
+    if expenses_df.empty:
+        business_total = personal_total = 0.0
+        tx_count = uncategorized = 0
+    else:
+        ledger = st.session_state.ledger
+        summary = TaxEngine().compute_summary(ledger, st.session_state.get("profile_tax_rate", 0.30))
+        business_total = summary.expenses
+        personal_total = summary.personal_expenses
+        tx_count = len(expenses_df)
+        uncategorized = int((expenses_df["category"] == "Uncategorized").sum())
+
+    st.markdown('<div class="nd-expenses-surface">', unsafe_allow_html=True)
+    st.markdown("##### Expense Overview")
+    c1, c2, c3, c4 = st.columns(4, gap="medium")
+    with c1:
+        _kpi("Business Expenses", format_usd(business_total))
+    with c2:
+        _kpi("Personal Expenses", format_usd(personal_total))
+    with c3:
+        _kpi("Expense Rows", str(tx_count))
+    with c4:
+        _kpi("Uncategorized", str(uncategorized))
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _flush_income_ledger() -> None:
@@ -808,6 +870,95 @@ a.skip-link:focus { top:1rem; }
 </style>
 """
 
+_DROPDOWN_ACCESSIBILITY_CSS = """
+<style>
+/* Global WCAG dropdown / selectbox contrast — Cloud Light + Charcoal */
+div[data-baseweb="select"] > div,
+div[data-baseweb="select"] > div > div,
+div[data-baseweb="select"] span,
+div[data-baseweb="select"] svg {
+    color: #0F172A !important;
+}
+div[data-baseweb="select"] > div {
+    background-color: #FFFFFF !important;
+    border: 1px solid #CBD5E1 !important;
+    border-radius: 0.55rem !important;
+}
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] > div,
+div[data-baseweb="popover"] ul,
+div[data-baseweb="menu"],
+div[data-baseweb="menu"] ul {
+    background-color: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12) !important;
+}
+div[data-baseweb="popover"] li,
+div[data-baseweb="menu"] li,
+li[role="option"],
+li[role="option"] span,
+div[role="option"],
+div[role="option"] span {
+    color: #0F172A !important;
+    background-color: #FFFFFF !important;
+}
+div[data-baseweb="popover"] li:hover,
+div[data-baseweb="menu"] li:hover,
+li[role="option"]:hover,
+div[role="option"]:hover,
+li[role="option"][aria-selected="true"],
+div[role="option"][aria-selected="true"] {
+    background-color: rgba(13, 122, 135, 0.12) !important;
+    color: #0F172A !important;
+}
+div[data-baseweb="popover"] li:hover span,
+div[data-baseweb="menu"] li:hover span,
+li[role="option"]:hover span,
+div[role="option"]:hover span {
+    color: #0F172A !important;
+}
+.stSelectbox label,
+.stMultiSelect label,
+div[data-testid="stSelectbox"] label,
+div[data-testid="stMultiSelect"] label {
+    color: #1E293B !important;
+}
+div[data-baseweb="tag"] {
+    background-color: #F1F5F9 !important;
+    border: 1px solid #CBD5E1 !important;
+    color: #0F172A !important;
+}
+div[data-baseweb="tag"] span {
+    color: #0F172A !important;
+}
+</style>
+"""
+
+_EXPENSES_PAGE_CSS = """
+<style>
+.nd-expenses-surface {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 0.85rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+}
+.nd-expenses-surface .nd-metric {
+    background: #F8FAFC !important;
+    border: 1px solid #E2E8F0 !important;
+}
+.nd-expenses-surface .nd-metric-label { color: #64748B !important; }
+.nd-expenses-surface .nd-metric-value { color: #0D7A87 !important; }
+.nd-expenses-ingest {
+    background-color: #FFFFFF;
+    border: 1px dashed #CBD5E1;
+    border-radius: 0.85rem;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+}
+</style>
+"""
+
 
 def _inject_styles() -> None:
     components.html(
@@ -815,6 +966,7 @@ def _inject_styles() -> None:
         height=0, width=0,
     )
     st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(_DROPDOWN_ACCESSIBILITY_CSS, unsafe_allow_html=True)
     st.markdown(
         """
         <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -1738,272 +1890,261 @@ absent the row is stored with `$0.00` pay.
 
 
 # ---------------------------------------------------------------------------
-# Page: Categorization
+# Page: Expenses
 # ---------------------------------------------------------------------------
 
-def render_categorization_page() -> None:
-    """Dedicated workspace engineered for purchase categorization and manual rules management."""
+def render_expenses_page() -> None:
+    """Expenses workspace — metrics dashboard, ingestion, classification, and category admin."""
+    st.markdown(_EXPENSES_PAGE_CSS, unsafe_allow_html=True)
+    render_alignment_blueprint()
+
     _section(
-        "Transaction Ledger & Categorization Workspace",
-        "Categorization Engine",
-        "Manage custom preset categories, review vendor classification intelligence, and edit transactions inline."
+        "Expenses",
+        "Expense Management",
+        "Classify Business vs. Personal expenditures, ingest receipt documents, and manage category presets.",
     )
 
     bridge = get_bridge()
     categories_list = bridge.fetch_tax_categories()
+    expenses_df = _normalize_expenses_df(st.session_state.expenses_ledger.copy())
 
-    # EXPENSES EXCLUSIVE: Get only expenditures
-    expenses_df = st.session_state.expenses_ledger.copy()
+    _render_expense_mini_dashboard(expenses_df)
 
-    # Layout Hierarchy: Place the Interactive Transaction Grid (st.data_editor) at the absolute TOP of the page as the dominant focal point.
-    st.markdown("##### ✏️  Interactive Expense Grid")
-    st.caption("Review and edit your business expenditures. Double-click any Category cell to select from your dynamic presets.")
+    st.markdown('<div class="nd-expenses-ingest">', unsafe_allow_html=True)
+    st.markdown("##### Upload Expense Documents")
+    st.caption(
+        "Receipt PDFs, vendor invoices, or expenditure CSVs are vaulted permanently and parsed into the expenses ledger."
+    )
+    exp_upload = st.file_uploader(
+        "Drop expense CSV or PDF files here",
+        type=["csv", "pdf"],
+        accept_multiple_files=True,
+        help="Files are SHA-256 hashed, deduplicated, and stored in .ndeavour_profile/secure_vault/.",
+        key=f"exp_page_uploader_{st.session_state.get('exp_uploader_rev', 0)}",
+    )
+    if exp_upload:
+        render_go_nogo_checklist("expense_upload")
+        if not st.session_state.get("nd_alignment_expense_upload"):
+            st.warning("Confirm Go/No-Go alignment before ingesting expense documents.")
+        else:
+            orchestrator = _get_orchestrator()
+            for f in exp_upload:
+                with st.spinner(f"Vaulting {f.name}…"):
+                    result = orchestrator.handle_upload(
+                        f.name, f.getvalue(), st.session_state.ledger
+                    )
+                if result["was_new"]:
+                    st.session_state.ledger = result["ledger"]
+                    st.session_state.expenses_ledger = _normalize_expenses_df(
+                        get_bridge().fetch_expenses_ledger()
+                    )
+                    st.session_state.income_ledger = get_bridge().fetch_income_ledger()
+                    st.success(result["message"])
+                    _status(f"Expense document ingested: {f.name}")
+                else:
+                    st.info(result["message"])
+            st.session_state.exp_uploader_rev = st.session_state.get("exp_uploader_rev", 0) + 1
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if expenses_df.empty:
-        st.info("The expenses ledger is currently empty. Upload bank exports in the Dashboard to begin.")
+    st.markdown("##### Interactive Expense Grid")
+    st.caption(
+        "Edit Business vs. Personal classification and category presets inline. Changes save instantly to disk."
+    )
+
+    type_filter = st.radio(
+        "Filter by classification",
+        options=["All", "Business", "Personal"],
+        horizontal=True,
+        key="expense_type_filter",
+    )
+
+    display_df = expenses_df
+    if not display_df.empty and type_filter != "All":
+        display_df = display_df.loc[display_df["expense_type"] == type_filter].copy()
+
+    if display_df.empty:
+        st.info("No expense rows match this filter. Upload documents above or adjust the classification filter.")
     else:
-        # We want to format date correctly for the editor
-        expenses_df["date"] = pd.to_datetime(expenses_df["date"]).dt.date
-        # Track changes to the grid
+        display_df["date"] = pd.to_datetime(display_df["date"]).dt.date
         edited_df = st.data_editor(
-            expenses_df,
+            display_df,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "date": st.column_config.DateColumn(
-                    "Date",
-                    format="YYYY-MM-DD",
+                "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", required=True),
+                "description": st.column_config.TextColumn("Description", required=True),
+                "amount": st.column_config.NumberColumn("Amount (USD)", format="$%.2f", required=True),
+                "kind": st.column_config.SelectboxColumn("Type", options=["expense"], required=True),
+                "expense_type": st.column_config.SelectboxColumn(
+                    "Classification",
+                    options=list(EXPENSE_TYPES),
                     required=True,
-                ),
-                "description": st.column_config.TextColumn(
-                    "Description",
-                    required=True,
-                ),
-                "amount": st.column_config.NumberColumn(
-                    "Amount (USD)",
-                    format="$%.2f",
-                    required=True,
-                ),
-                "kind": st.column_config.SelectboxColumn(
-                    "Type",
-                    options=["expense"],
-                    required=True,
+                    help="Business expenses feed tax metrics; Personal expenses are tracked separately.",
                 ),
                 "category": st.column_config.SelectboxColumn(
-                    "Category Presets",
+                    "Category",
                     options=categories_list,
                     required=True,
                 ),
-                "source": st.column_config.TextColumn(
-                    "Source",
-                    disabled=True,
-                ),
+                "source": st.column_config.TextColumn("Source", disabled=True),
             },
-            key="expenses_data_editor"
+            key="expenses_data_editor",
         )
 
-        # Instantly commit audited entry back to disk without requiring a full manual reload trigger if edited
-        if not edited_df.equals(expenses_df):
-            st.session_state.expenses_ledger = edited_df
+        if not edited_df.equals(display_df):
+            edited_df = _normalize_expenses_df(edited_df)
+            if type_filter == "All":
+                st.session_state.expenses_ledger = edited_df
+            else:
+                other = expenses_df.loc[expenses_df["expense_type"] != type_filter].copy()
+                st.session_state.expenses_ledger = _normalize_expenses_df(
+                    pd.concat([other, edited_df], ignore_index=True)
+                )
             _flush_expenses_ledger()
-            st.success("Expenses ledger updated and committed instantly to secure storage!")
+            st.success("Expenses ledger updated and committed to secure storage.")
             _status("Expenses ledger changes committed.")
             st.rerun()
 
-    _divider_space(1.5)
+    _divider_space(1.0)
 
-    col_presets, col_review = st.columns([0.45, 0.55], gap="large")
+    with st.expander("Category Administration", expanded=False):
+        st.caption("Compact utility for creating, renaming, and deleting custom category presets.")
+        create_col, edit_col, delete_col = st.columns(3, gap="medium")
+        custom_cats = _custom_categories(categories_list)
 
-    # ── 1. DYNAMIC CATEGORY RULES MANAGEMENT ───────────────────────────
-    with col_presets:
-        st.markdown("##### 📁  Manage Category Pre-sets")
-        st.caption("Create, edit or delete expense categories. Standard categories cannot be deleted.")
-
-        # Subsection widget 1: Create a new preset
-        with st.form("create_category_form", clear_on_submit=True):
-            st.markdown("**Create New Category**")
-            new_cat_name = st.text_input("Category label", placeholder="e.g. AI Infrastructure")
-            create_submitted = st.form_submit_button("Create Category", use_container_width=True)
-
-            if create_submitted:
-                success, msg = bridge.add_tax_category(new_cat_name)
-                if success:
-                    st.success(msg)
-                    _status(f"Category created: {new_cat_name}")
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-        _divider_space(0.5)
-
-        # Subsection widget 2: Edit an existing category label
-        with st.form("edit_category_form", clear_on_submit=True):
-            st.markdown("**Edit Category Label**")
-            edit_target = st.selectbox(
-                "Select category to edit",
-                options=[c for c in categories_list if c not in [
-                    "Revenue", "Software", "Contractors", "Travel", "Meals",
-                    "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized"
-                ]],
-                help="Only custom-created categories can be renamed."
-            )
-            edited_label = st.text_input("New category label", placeholder="Enter renamed label")
-            edit_submitted = st.form_submit_button("Update Label", use_container_width=True)
-
-            if edit_submitted:
-                if not edited_label.strip():
-                    st.error("Renamed label cannot be empty.")
-                else:
-                    # Update label logic
-                    success, msg = bridge.delete_tax_category(edit_target)
+        with create_col:
+            with st.form("create_category_form", clear_on_submit=True):
+                st.markdown("**Create**")
+                new_cat_name = st.text_input("New label", placeholder="e.g. AI Infrastructure", key="exp_cat_create")
+                if st.form_submit_button("Create", use_container_width=True):
+                    success, msg = bridge.add_tax_category(new_cat_name)
                     if success:
-                        bridge.add_tax_category(edited_label)
-                        # Fallback any transactions matching the edited target to the renamed label
-                        exp_ledger = st.session_state.expenses_ledger.copy()
-                        exp_ledger.loc[exp_ledger["category"] == edit_target, "category"] = edited_label.strip()
-                        st.session_state.expenses_ledger = exp_ledger
-                        _flush_expenses_ledger()
-                        st.success(f"Successfully updated category label from '{edit_target}' to '{edited_label}'!")
+                        st.success(msg)
                         st.rerun()
                     else:
                         st.error(msg)
 
-        _divider_space(0.5)
-
-        # Subsection widget 3: Delete an expense category
-        with st.form("delete_category_form", clear_on_submit=True):
-            st.markdown("**Delete Category**")
-            delete_target = st.selectbox(
-                "Select category to delete",
-                options=[c for c in categories_list if c not in [
-                    "Revenue", "Software", "Contractors", "Travel", "Meals",
-                    "Office", "Bank Fees", "Taxes", "Owner Draw", "Uncategorized"
-                ]],
-                help="Only custom-created categories can be deleted. Standard default categories are fixed."
-            )
-            delete_submitted = st.form_submit_button("Delete Category Preset", use_container_width=True)
-
-            if delete_submitted:
-                success, msg = bridge.delete_tax_category(delete_target)
-                if success:
-                    # Provide a safe fallback rule in the pandas data layer to reset any assigned transactions to 'Uncategorized'
-                    exp_ledger = st.session_state.expenses_ledger.copy()
-                    exp_ledger.loc[exp_ledger["category"] == delete_target, "category"] = "Uncategorized"
-                    st.session_state.expenses_ledger = exp_ledger
-                    _flush_expenses_ledger()
-                    st.success(f"Category '{delete_target}' deleted. All matching expenses reset to 'Uncategorized'.")
-                    _status(f"Category deleted: {delete_target}")
-                    st.rerun()
+        with edit_col:
+            with st.form("edit_category_form", clear_on_submit=True):
+                st.markdown("**Rename**")
+                if custom_cats:
+                    edit_target = st.selectbox("Category", options=custom_cats, key="exp_cat_edit_sel")
+                    edited_label = st.text_input("New label", key="exp_cat_edit_label")
+                    if st.form_submit_button("Rename", use_container_width=True):
+                        if not edited_label.strip():
+                            st.error("Label cannot be empty.")
+                        else:
+                            success, msg = bridge.delete_tax_category(edit_target)
+                            if success:
+                                bridge.add_tax_category(edited_label)
+                                exp_ledger = st.session_state.expenses_ledger.copy()
+                                exp_ledger.loc[exp_ledger["category"] == edit_target, "category"] = edited_label.strip()
+                                st.session_state.expenses_ledger = _normalize_expenses_df(exp_ledger)
+                                _flush_expenses_ledger()
+                                st.success(f"Renamed '{edit_target}' → '{edited_label.strip()}'")
+                                st.rerun()
+                            else:
+                                st.error(msg)
                 else:
-                    st.error(msg)
+                    st.caption("No custom categories to rename.")
 
-    # ── 3. "REVIEW INSTANCES" DRILLDOWN WINDOW ────────────────────────────
-    with col_review:
-        st.markdown("##### 🔍  Review Instance Panel")
-        st.caption("Inspect why a specific vendor expense was initially classified under its assigned preset category.")
+        with delete_col:
+            with st.form("delete_category_form", clear_on_submit=True):
+                st.markdown("**Delete**")
+                if custom_cats:
+                    delete_target = st.selectbox("Category", options=custom_cats, key="exp_cat_del_sel")
+                    if st.form_submit_button("Delete", use_container_width=True):
+                        success, msg = bridge.delete_tax_category(delete_target)
+                        if success:
+                            exp_ledger = st.session_state.expenses_ledger.copy()
+                            exp_ledger.loc[exp_ledger["category"] == delete_target, "category"] = "Uncategorized"
+                            st.session_state.expenses_ledger = _normalize_expenses_df(exp_ledger)
+                            _flush_expenses_ledger()
+                            st.success(f"Deleted '{delete_target}'. Matching rows set to Uncategorized.")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                else:
+                    st.caption("No custom categories to delete.")
 
-        if expenses_df.empty:
-            st.info("No transaction records loaded to review.")
-        else:
-            # User selection drilldown panel
+    if not expenses_df.empty:
+        with st.expander("Vendor Classification Review", expanded=False):
             selected_desc = st.selectbox(
-                "Select transaction description to analyze",
+                "Transaction description",
                 options=sorted(expenses_df["description"].unique().tolist()),
-                index=0,
-                help="Select any description to inspect its classification intelligence pattern.",
-                key="analysis_descriptor_selector"
+                key="analysis_descriptor_selector",
             )
-
             if selected_desc:
                 matching_rows = expenses_df[expenses_df["description"] == selected_desc]
-                row_count = len(matching_rows)
                 sample_row = matching_rows.iloc[0]
-                current_category = sample_row["category"]
-                current_amount = sample_row["amount"]
-                current_kind = sample_row["kind"]
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.metric("Occurrences", len(matching_rows))
+                with c2:
+                    st.metric("Category", sample_row["category"])
+                with c3:
+                    st.metric("Classification", sample_row.get("expense_type", "Personal"))
+                with c4:
+                    st.metric("Amount", format_usd(sample_row["amount"]))
 
-                with st.expander(f"🔍  Vendor Intelligence Profile: **{selected_desc}**", expanded=True):
-                    # Basic context data
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.metric("Total Occurrences", f"{row_count} row(s)")
-                    with c2:
-                        st.metric("Assigned Category", current_category)
-                    with c3:
-                        st.metric("Sample Value", format_usd(current_amount))
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    try:
+                        api_key = st.secrets.get("OPENAI_API_KEY")
+                    except Exception:
+                        pass
 
-                    # Lazy import openai or compute deterministic rule logic fallback
-                    api_key = os.getenv("OPENAI_API_KEY")
-                    
-                    # Check for streamlit secrets key
-                    if not api_key:
+                if api_key:
+                    with st.spinner("Analyzing classification…"):
                         try:
-                            api_key = st.secrets.get("OPENAI_API_KEY")
-                        except Exception:
-                            pass
-
-                    if api_key:
-                        with st.spinner("Phreedom AI is auditing historical vendor classification logic..."):
-                            try:
-                                from openai import OpenAI
-                                client = OpenAI(api_key=api_key)
-                                
-                                system_prompt = (
-                                    "You are Phreedom, an advanced personal finance categorization analyzer. "
-                                    "Your goal is to inspect a given transaction and explain why it fits into its current category. "
-                                    "Look for standard merchant pattern words, billing structures, or common industry trends. "
-                                    "Provide a concise summary (max 3 sentences) explaining the mapping, and end your explanation "
-                                    "by rating your classification confidence on an absolute percentage scale (e.g. 'Confidence Metric: **95%**')."
-                                )
-                                user_prompt = (
-                                    f"Merchant Name: '{selected_desc}'\n"
-                                    f"Current Category Map: '{current_category}'\n"
-                                    f"Transaction Type: '{current_kind}'\n"
-                                    f"Transaction Value: '{format_usd(current_amount)}'"
-                                )
-                                
-                                response = client.chat.completions.create(
-                                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                                    messages=[
-                                        {"role": "system", "content": system_prompt},
-                                        {"role": "user", "content": user_prompt}
-                                    ],
-                                    temperature=0.2,
-                                    max_tokens=150
-                                )
-                                explanation = response.choices[0].message.content or ""
-                                st.markdown(f"**Classification Summary:**\n\n{explanation}")
-                            except Exception as e:
-                                st.warning(f"Failed to query AI classification API: {e}")
-                                st.markdown("**Deterministic Confidence Metric:** **85%** *(Deterministic Mapping)*")
-                    else:
-                        # Deterministic Keyword confidence matching
-                        st.caption("*(OpenAI key not active; falling back to deterministic category rules engine analysis)*")
-                        confidence = 80
-                        # If matches standard common terms
-                        from app import CC_SPEND_CATEGORIES
-                        matched = False
-                        for standard_cat, keywords in CC_SPEND_CATEGORIES.items():
-                            if any(kw in selected_desc.lower() for kw in keywords):
-                                st.markdown(
-                                    f"**Classification Summary:**\n\n"
-                                    f"The vendor descriptor **'{selected_desc}'** matched the keyword classification registry rules list for the "
-                                    f"group **'{standard_cat}'**. Historical transaction ingestion records successfully verified "
-                                    f"this merchant format as a standard business cost, which maps directly to your target tax ledger rules."
-                                )
-                                confidence = 95
-                                matched = True
-                                break
-                        
-                        if not matched:
-                            st.markdown(
-                                f"**Classification Summary:**\n\n"
-                                f"The merchant **'{selected_desc}'** does not match any automatic vendor keyword mappings. "
-                                f"It was assigned to the fallback category **'{current_category}'**. A manual categorization check "
-                                f"or custom category pre-set configuration rules adjustment is recommended to establish high-confidence tax ledgers."
+                            from openai import OpenAI
+                            client = OpenAI(api_key=api_key)
+                            response = client.chat.completions.create(
+                                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You are Phreedom, a finance categorization analyzer. "
+                                            "Explain why a transaction fits its category in ≤3 sentences."
+                                        ),
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            f"Merchant: '{selected_desc}'\n"
+                                            f"Category: '{sample_row['category']}'\n"
+                                            f"Classification: '{sample_row.get('expense_type', 'Personal')}'\n"
+                                            f"Amount: '{format_usd(sample_row['amount'])}'"
+                                        ),
+                                    },
+                                ],
+                                temperature=0.2,
+                                max_tokens=150,
                             )
-                        
-                        st.markdown(f"Confidence Metric: **{confidence}%**")
+                            st.markdown(response.choices[0].message.content or "")
+                        except Exception as e:
+                            st.warning(f"AI analysis unavailable: {e}")
+                else:
+                    matched = False
+                    for standard_cat, keywords in CC_SPEND_CATEGORIES.items():
+                        if any(kw in selected_desc.lower() for kw in keywords):
+                            st.markdown(
+                                f"Keyword match for **{standard_cat}** — confidence **95%**."
+                            )
+                            matched = True
+                            break
+                    if not matched:
+                        st.markdown(
+                            f"No keyword match for **{selected_desc}**. "
+                            f"Assigned to **{sample_row['category']}** — manual review recommended."
+                        )
+
+
+def render_categorization_page() -> None:
+    """Backward-compatible alias for the Expenses page."""
+    render_expenses_page()
 
 
 # ---------------------------------------------------------------------------
@@ -2192,8 +2333,8 @@ def main() -> None:
         render_dashboard(tax_rate)
     elif active_page == "Timesheet":
         render_timesheet(tax_rate)
-    elif active_page == "Categorization":
-        render_categorization_page()
+    elif active_page in ("Expenses", "Categorization"):
+        render_expenses_page()
     elif active_page == "Admin Control Panel":
         render_admin_dashboard()
     elif active_page == "Chat":
