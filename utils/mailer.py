@@ -90,27 +90,27 @@ def send_reset_email(to_email: str, username: str, token: str, app_url: str = "h
     # HTML body with N-Deavour brand colors (Cloud Light #F8FAFC, Deep Teal #0D7A87)
     html_body = f"""
     <html>
-      <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #F8FAFC; color: #1E293B; padding: 2rem; margin: 0;">
+      <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #F8FAFC; color: #0F172A; padding: 2rem; margin: 0;">
         <div style="max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 2.5rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
           <div style="text-align: center; margin-bottom: 2rem;">
             <h2 style="color: #0D7A87; margin: 0; font-size: 1.5rem; letter-spacing: -0.03em;">N-DEAVOUR ALIGNMENT</h2>
             <p style="color: #64748B; font-size: 0.85rem; margin: 0.25rem 0 0 0; text-transform: uppercase; letter-spacing: 0.05em;">Excellence through efficiency</p>
           </div>
           
-          <p style="font-size: 1rem; line-height: 1.6; color: #334155;">Hello <strong>{username}</strong>,</p>
+          <p style="font-size: 1rem; line-height: 1.6; color: #0F172A;">Hello <strong style="color: #0F172A;">{username}</strong>,</p>
           
-          <p style="font-size: 1rem; line-height: 1.6; color: #334155;">We received a request to reset your password. Click the button below to set a new password. This link is only valid for <strong>15 minutes</strong>.</p>
+          <p style="font-size: 1rem; line-height: 1.6; color: #0F172A;">We received a request to reset your password. Click the button below to set a new password. This link is only valid for <strong>15 minutes</strong>.</p>
           
           <div style="text-align: center; margin: 2.5rem 0;">
             <a href="{reset_link}" style="background-color: #0D7A87; color: #FFFFFF; text-decoration: none; padding: 0.8rem 2rem; font-weight: bold; border-radius: 6px; display: inline-block; box-shadow: 0 4px 12px rgba(13, 122, 135, 0.25); transition: background-color 0.2s ease;">Reset Password</a>
           </div>
           
           <p style="font-size: 0.9rem; line-height: 1.6; color: #64748B;">If the button above does not work, copy and paste this URL into your browser:</p>
-          <p style="font-size: 0.85rem; line-height: 1.5; color: #0D7A87; word-break: break-all; background-color: #F1F5F9; padding: 0.75rem; border-radius: 4px;">{reset_link}</p>
+          <p style="font-size: 0.85rem; line-height: 1.5; color: #0F172A; word-break: break-all; background-color: #F1F5F9; padding: 0.75rem; border-radius: 4px;">{reset_link}</p>
           
           <hr style="border: 0; border-top: 1px solid #E2E8F0; margin: 2rem 0;" />
           
-          <p style="font-size: 0.8rem; line-height: 1.5; color: #94A3B8; margin: 0;">If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged.</p>
+          <p style="font-size: 0.8rem; line-height: 1.5; color: #64748B; margin: 0;">If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged.</p>
         </div>
       </body>
     </html>
